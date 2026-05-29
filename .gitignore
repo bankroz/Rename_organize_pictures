@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE / Dev
+.codebuddy/
+.workbuddy/
+.vscode/
+.idea/
+
+# Test data
+测试集/
+
+# Runtime output
+preview_report.csv
+rename_log.csv
+dedup_preview.csv
+dedup_log.csv
+discover_patterns.csv
+
+# System
+.DS_Store
+Thumbs.db
