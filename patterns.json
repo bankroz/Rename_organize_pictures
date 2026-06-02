@@ -69,7 +69,7 @@
       "id": 10,
       "regex": "(\\d{4})-(\\d{2})-(\\d{2}) (\\d{2})-(\\d{2})-(\\d{2})",
       "group_count": 6,
-      "description": "YYYY-MM-DD HH-MM-SS（空格分隔，如 2015-12-04 15-39-11-于果）",
+      "description": "YYYY-MM-DD HH-MM-SS（空格分隔，如 2015-12-04 15-39-11-desc）",
       "is_own_output": false
     },
     {

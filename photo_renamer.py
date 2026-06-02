@@ -148,7 +148,7 @@ _DEFAULT_PATTERNS_CONFIG = [
     {"id": 9, "regex": r'(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})',
      "group_count": 6, "description": "YYYY-MM-DD-HH-MM-SS（全中划线分隔，如 Screenshot_2024-06-15-14-30-22）", "is_own_output": False},
     {"id": 10, "regex": r'(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})',
-     "group_count": 6, "description": "YYYY-MM-DD HH-MM-SS（空格分隔，如 2015-12-04 15-39-11-于果）", "is_own_output": False},
+     "group_count": 6, "description": "YYYY-MM-DD HH-MM-SS（空格分隔，如 2015-12-04 15-39-11-desc）", "is_own_output": False},
     {"id": 11, "regex": r'(\d{4})_(\d{2})_(\d{2})_(\d{2})(\d{2})(\d{2})',
      "group_count": 6, "description": "YYYY_MM_DD_HHMMSS（全下划线分隔，如 HwVideoEditor_2020_08_22_175855）", "is_own_output": False},
     {"id": 17, "regex": r'(\d{4})-(\d{2})-(\d{2})-(\d{2})h(\d{2})m(\d{2})',
