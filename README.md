@@ -255,6 +255,8 @@ python photo_renamer.py -s "\\NAS\照片" -m preview
 ```
 
 > `launch.bat` 为 **GBK 编码**，在 Windows 简体中文系统上双击即可正常显示中文菜单。在非中文 Windows 上菜单可能乱码，但不影响功能——直接使用 CLI 命令即可。
+>
+> 提示：选择菜单后输入路径时，**可以直接把文件夹从资源管理器拖拽到命令行窗口**，系统会自动填入路径。
 
 选项 [3]/[4] 执行时，若检测到目录含已重命名文件，bat 会自动询问"是否强制继续？"，输入 `yes` 后自动追加 `--force` 重新执行，无需手动输入完整命令。
 
@@ -264,7 +266,7 @@ python photo_renamer.py -s "\\NAS\照片" -m preview
 python photo_renamer.py -s <源文件夹> [选项]
 
 必需参数:
-  -s, --source       源文件夹路径
+  -s, --source       源文件夹路径（交互模式下可直接拖拽文件夹到窗口）
 
 可选参数:
   -m, --mode         模式: preview（预览，默认）/ execute（执行）
