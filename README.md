@@ -1,4 +1,4 @@
-# Photo & Video Renamer v2.4
+# Photo & Video Renamer v2.6
 
 照片和视频**批量按日期重命名**工具。自动从多种来源提取拍摄时间，统一命名为 `YYYY.MM.DD_HHMM` 格式，支持 33 种媒体格式，针对网络盘（群晖 NAS 等）场景做了专项适配。
 
@@ -26,7 +26,8 @@
 | **4 级日期提取优先级** | EXIF → 文件名日期模式 → Unix 时间戳 → 文件修改时间，层层兜底 |
 | **19 种文件名模式** | 覆盖全品牌安卓手机、iPhone、大疆、单反微单、微信/QQ/微博/抖音等设备和应用 |
 | **可编辑模式配置** | `patterns.json` 外部 JSON 配置，手动添加/修改日期规则，即改即生效 |
-| **智能模式发现** | `--discover` 自动扫描未识别文件中的潜在日期格式，生成建议条目供审核 |
+| **智能模式发现** | 处理完成后自动扫描未匹配文件，发现新命名规则并提示用户确认写入 patterns.json |
+| **错误弹窗容错** | GUI 环境下 tkinter 弹窗显示错误信息，交互模式自动回到菜单，不会闪退 |
 | **冲突智能处理** | 同名文件分钟自动 +1，含级联碰撞保护 |
 | **Windows 副本处理** | 自动识别 `文件名 (2).jpg` 等合并文件夹产生的副本，分配邻近空闲时间槽 |
 | **重复处理保护** | 检测已重命名目录，执行模式自动中止并提示，防止视频时分信息丢失 |
@@ -40,6 +41,7 @@
 | **渐进式 EXIF 读取** | 只读文件头部 256 KB，无 EXIF 立即回退，避免大文件下载浪费流量 |
 | **哈希文件名防误判** | 32 字符以上的哈希类文件名自动跳过时间戳匹配 |
 | **零依赖核心** | Pillow 是唯一可选依赖，缺失时 EXIF 不可用，但文件名/时间戳功能完全正常 |
+| **绿色 exe 发布** | PyInstaller 打包的独立 exe（约 15 MB），无需安装 Python，双击即用 |
 | **实时进度条** | 终端内联进度条，显示处理进度、耗时、超时跳过数 |
 | **核心与 CLI 分离** | `PhotoRenamer` 类可直接被 GUI 调用，不依赖 argparse |
 | **单文件架构** | 整个项目 1 个 Python 文件，复制即用 |
@@ -49,7 +51,7 @@
 ## 架构流程
 
 ```
-用户双击 launch.bat（GBK 编码，CMD 原生稳定）
+用户双击 launch.bat / photo_renamer.exe（GBK 编码，CMD 原生稳定）
           │
           ├─ 检查 Python → 安装指引
           ├─ 选择模式（预览 / 执行 / 副本整理 / 自定义）
@@ -64,13 +66,15 @@ python photo_renamer.py -s <文件夹> -m <模式>
           │    ├─ Unix 时间戳（10位/13位 + App 前缀）
           │    └─ 文件修改时间           ← 最终兜底
           │
-          ├─ PatternDiscoverer  智能模式发现（--discover）
-          │    6 阶段启发式扫描 → 生成建议 JSON 条目
+          ├─ PatternDiscoverer  智能模式发现（--discover / 交互模式自动触发）
+          │    6 阶段启发式扫描 → 生成建议 JSON 条目 → 用户确认 → 写入 patterns.json
           │
           ├─ PhotoRenamer      重命名引擎
           │    ├─ scan_files()      扫描所有媒体文件
           │    ├─ process()         冲突处理 + 邻近 slot 分配
           │    └─ execute()         原地重命名 / 复制到 output
+          │
+          ├─ _show_error()     错误弹窗（tkinter messagebox，防止闪退）
           │
           └─ run_with_timeout()  全链路 I/O 超时保护
                ThreadPoolExecutor，默认 15 s，可通过环境变量调整
@@ -85,6 +89,8 @@ python photo_renamer.py -s <文件夹> -m <模式>
 | `PhotoRenamer` | 重命名引擎 | 扫描、冲突处理（分钟递增 + 级联保护）、CSV 导出 |
 | `ProgressBar` | 终端进度条 | 零依赖，`\r` 原地刷新，非交互模式逐行输出 |
 | `run_with_timeout()` | 超时保护 | ThreadPoolExecutor，默认 15 s，环境变量配置 |
+| `_show_error()` | 错误弹窗 | tkinter messagebox 显示错误，终端 fallback 到 print |
+| `_offer_new_patterns()` | 智能模式追加 | 处理后扫描未匹配文件，用户确认后写入 patterns.json |
 
 ---
 
@@ -179,6 +185,20 @@ pip install pillow-heif
 
 ### 一键部署
 
+**方式 A：绿色 exe（推荐，免安装 Python）**
+
+```
+win/
+├── photo_renamer.exe    # 独立可执行文件（约 15 MB，已内含 Python）
+└── patterns.json        # 日期模式配置文件（19 种模式，可手动编辑）
+```
+
+将 `win/` 文件夹复制到任意位置，**双击 `photo_renamer.exe`** 即可进入交互菜单。无需安装 Python 或任何依赖。
+
+> 注意：exe 内不含 Pillow，因此**图片 EXIF 读取不可用**。文件名模式和时间戳提取功能正常。如需 EXIF 支持，请使用方式 B（Python 运行）。
+
+**方式 B：Python 源码运行**
+
 ```bash
 # 1. 复制项目文件（共 3 个文件）
 #    photo_renamer.py  launch.bat  patterns.json
@@ -190,6 +210,8 @@ pip install Pillow
 # 3b. 或命令行运行
 python photo_renamer.py -s "D:\照片" -m preview
 ```
+
+> **方式 A vs B 对比**：exe 适合快速在不同电脑上使用（无需安装），但缺少 EXIF 支持。Python 方式功能更完整，推荐长期使用。
 
 ### 网络盘（群晖 NAS）使用
 
@@ -217,9 +239,9 @@ python photo_renamer.py -s "\\NAS\照片" -m preview
 
 ## 使用方法
 
-### launch.bat 交互式菜单（Windows 推荐）
+### launch.bat / exe 交互式菜单（Windows 推荐）
 
-将 `launch.bat` 和 `photo_renamer.py` 放在同一目录，双击运行：
+**双击 exe**（`win/photo_renamer.exe`）或 **launch.bat**，均进入交互菜单：
 
 ```
 [1] 预览 - 单个文件夹
@@ -312,7 +334,7 @@ v2.0 起，日期识别模式改为外部 JSON 配置，支持手动编辑：
 
 ```json
 {
-  "version": "2.4",
+  "version": "2.6",
   "patterns": [
     {
       "id": 16,
@@ -346,7 +368,11 @@ python photo_renamer.py --generate-config
 python photo_renamer.py -s "D:\照片" -m preview --pattern-config "D:\my_patterns.json"
 ```
 
-### 智能模式发现（--discover）
+### 智能模式发现
+
+本工具支持两种智能发现方式：
+
+**方式 1：CLI `--discover` 模式**（批量扫描 + 导出 CSV）
 
 自动扫描未匹配文件，检测潜在日期格式，生成建议 JSON 条目：
 
@@ -367,6 +393,10 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 5. 导出 CSV 供人工核对
 
 核查无误后，将建议条目复制到 `patterns.json` 的 `"patterns"` 数组中，重新运行即可识别新模式。
+
+**方式 2：交互模式自动触发**（exe 双击 / 无参数运行）
+
+使用交互菜单或双击 exe 处理完文件后，程序会自动扫描未匹配的文件。如果发现潜在的日期格式，会展示给用户确认——输入 `y` 即可自动写入 `patterns.json` 并热加载，下次运行直接生效。无需手动编辑配置文件。
 
 ---
 
@@ -578,10 +608,20 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 - **重复处理**：对已重命名的目录重新执行需加 `--force`，防止视频时分信息被错误覆盖
 - **Pillow 降级**：未安装 Pillow 时，图片 EXIF 不可用，但文件名 / 时间戳提取功能完全正常
 - **HEIC 支持**：需要额外安装 `pillow-heif`，见"环境依赖与安装"章节
+- **exe 绿色版**：`win/photo_renamer.exe` 内不含 Pillow，图片 EXIF 不可用；文件名模式和时间戳提取功能正常
 
 ---
 
 ## 版本历史
+
+### v2.6（2026-06-02）
+
+- 新增 `_show_error()` 错误弹窗：GUI 环境下用 tkinter messagebox 显示错误，防止双击 exe 时闪退看不到原因
+- 新增 `_offer_new_patterns()` 智能模式追加：处理完成后自动扫描未匹配文件，发现新命名规则后提示用户确认写入 patterns.json
+- `main()` 重构为 `while True` 循环：交互模式下错误/完成都回到菜单，三层异常兜底（try/except → SystemExit → `__name__` guard）
+- 新增交互式菜单（内置到 Python 脚本），双击 exe 直接进入菜单，无需 launch.bat
+- 新增 `build.bat` + `photo_renamer.spec`，支持一键构建绿色 exe
+- 修复多处不可达代码（`sys.exit()` 在 `is_interactive` 检查之前导致后者永远不执行）
 
 ### v2.5（2026-06-02）
 

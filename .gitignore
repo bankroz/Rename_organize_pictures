@@ -5,6 +5,7 @@ __pycache__/
 # Build artifacts
 build/
 photo_renamer.pyz
+win/
 
 # IDE / Dev
 .codebuddy/
