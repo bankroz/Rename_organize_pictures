@@ -165,6 +165,9 @@ _DEFAULT_PATTERNS_CONFIG = [
      "group_count": 6, "description": "YYYYMMDDHHMMSS（紧凑型全部连接，如 IMG20220625102520, faceu_..._20201024204541523）", "is_own_output": False},
     {"id": 16, "regex": r'(\d{4})(\d{2})(\d{2})',
      "group_count": 3, "description": "YYYYMMDD（纯8位日期，如 20220502（1））", "is_own_output": False},
+    {"id": 19, "regex": r'(\d{2})-(\d{2})-(\d{4}) (\d{2})(\d{2})(\d{2})',
+     "group_count": 6, "description": "DD-MM-YYYY HHMMSS（iPhone录屏，如 ScreenRecording_02-06-2026 154022）",
+     "is_own_output": False, "group_order": "DMYhms"},
 ]
 
 # 全局模式配置路径
@@ -213,7 +216,9 @@ def generate_default_config(json_path: Path = None):
         "_instructions": (
             "每个 pattern 包含: regex(正则表达式), group_count(捕获组数:3/5/6), "
             "description(描述), is_own_output(是否自有输出格式)。"
-            "捕获组必须按 年、月、日、时、分、秒 顺序。"
+            "捕获组默认按 年、月、日、时、分、秒 顺序（YMDHMS）。"
+            "若文件名日期顺序不同（如 iPhone 录屏 DD-MM-YYYY），可添加 "
+            "group_order 字段指定顺序（如 'DMYhms'，字符含义: Y年 M月 D日 h时 m分 s秒）。"
             "添加新模式时按优先级排列（精确的在前），保存后重新运行即可生效。"
         ),
         "patterns": _DEFAULT_PATTERNS_CONFIG,
@@ -436,23 +441,32 @@ class DateExtractor:
             for match in pattern.finditer(stem):
                 groups = match.groups()
                 try:
-                    if len(groups) == 6:  # YYYY MM DD HH MM SS
-                        y, m, d, hh, mm, ss = map(int, groups)
-                        dt = datetime(y, m, d, hh, mm, ss)
-                    elif len(groups) == 5:  # YYYY MM DD HH MM
-                        y, m, d, hh, mm = map(int, groups)
-                        dt = datetime(y, m, d, hh, mm, 0)
-                    elif len(groups) == 3:  # YYYY MM DD
-                        y, m, d = map(int, groups)
-                        dt = datetime(y, m, d, 0, 0, 0)
-                    else:
-                        continue
+                    group_order = entry.get('group_order', 'YMDhms')
+                    values = list(map(int, groups))
+                    gc = len(values)
+
+                    # group_order 中的字符依次对应 values 的各个位置
+                    # 字符含义: Y=年, M=月, D=日, h=时, m=分, s=秒
+                    # 默认 "YMDhms": values[0]=year, values[1]=month, values[2]=day
+                    # iPhone 录屏 "DMYhms": values[0]=day, values[1]=month, values[2]=year
+                    field_values = {}
+                    for i, ch in enumerate(group_order[:gc]):
+                        field_values[ch] = values[i]
+
+                    y = field_values.get('Y', values[0])
+                    mo = field_values.get('M', values[1] if gc >= 2 else 1)
+                    d = field_values.get('D', values[2] if gc >= 3 else 1)
+                    hh = field_values.get('h', 0)
+                    mm = field_values.get('m', 0)
+                    ss = field_values.get('s', 0)
+
+                    dt = datetime(y, mo, d, hh, mm, ss)
 
                     # 合理性检查
-                    if 1970 <= y <= 2099 and 1 <= m <= 12 and 1 <= d <= 31:
+                    if 1970 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
                         desc = entry.get('description', f'模式{idx + 1}')
                         return dt, f'Filename({desc})'
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, KeyError, IndexError):
                     continue
 
         return None, ''

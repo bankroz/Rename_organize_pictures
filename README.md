@@ -24,7 +24,7 @@
 | 特性 | 说明 |
 |------|------|
 | **4 级日期提取优先级** | EXIF → 文件名日期模式 → Unix 时间戳 → 文件修改时间，层层兜底 |
-| **18 种文件名模式** | 覆盖主流相机、手机、微信、华为、HwVideoEditor、小红书等设备和应用 |
+| **19 种文件名模式** | 覆盖全品牌安卓手机、iPhone、大疆、单反微单、微信/QQ/微博/抖音等设备和应用 |
 | **可编辑模式配置** | `patterns.json` 外部 JSON 配置，手动添加/修改日期规则，即改即生效 |
 | **智能模式发现** | `--discover` 自动扫描未识别文件中的潜在日期格式，生成建议条目供审核 |
 | **冲突智能处理** | 同名文件分钟自动 +1，含级联碰撞保护 |
@@ -60,7 +60,7 @@ python photo_renamer.py -s <文件夹> -m <模式>
           │
           ├─ DateExtractor     日期提取引擎（4 级优先级链）
           │    ├─ EXIF DateTimeOriginal  ← 相机写入，最准确
-          │    ├─ 文件名日期（18 种模式）← patterns.json 配置
+          │    ├─ 文件名日期（19 种模式）← patterns.json 配置
           │    ├─ Unix 时间戳（10位/13位 + App 前缀）
           │    └─ 文件修改时间           ← 最终兜底
           │
@@ -147,7 +147,7 @@ python -c "from PIL import Image; print('Pillow OK')"
 photo_renamer/
 ├── photo_renamer.py    # 核心脚本（DateExtractor + PhotoRenamer + CLI）
 ├── launch.bat          # Windows 交互式启动器（GBK 编码，中文菜单）
-└── patterns.json       # 日期模式配置文件（18 种模式，可手动编辑）
+├── patterns.json       # 日期模式配置文件（19 种模式，可手动编辑）
 ```
 
 > `README.md` 为说明文档，`.workbuddy/` 和 `测试集/` 为本地开发数据，均不需要复制。
@@ -329,9 +329,10 @@ v2.0 起，日期识别模式改为外部 JSON 配置，支持手动编辑：
 
 | 字段 | 说明 |
 |------|------|
-| `regex` | Python 正则表达式，捕获组必须按 **年/月/日/时/分/秒** 顺序 |
+| `regex` | Python 正则表达式，捕获组按 **年/月/日/时/分/秒** 顺序（或通过 `group_order` 指定） |
 | `group_count` | 3 = 仅日期；5 = 日期+时分；6 = 日期+时分秒 |
 | `is_own_output` | `true` 表示该格式用于"已重命名"检测（精确锚定匹配） |
+| `group_order` | 可选，捕获组语义顺序：`Y`年 `M`月 `D`日 `h`时 `m`分 `s`秒，默认 `YMDhms` |
 
 添加新模式时，按优先级排列（精确的在前），保存后重新运行即可生效。
 
@@ -359,7 +360,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 
 工作流程：
 
-1. 先用现有 18 种模式匹配，统计覆盖率
+1. 先用现有 19 种模式匹配，统计覆盖率
 2. 对未匹配文件用启发式算法扫描（Y-M-D / D-M-Y / 紧凑型 / 混合分隔符 / Unix 时间戳）
 3. 按模式签名分组展示，标注歧义格式 ⚠
 4. 自动生成建议的 JSON 配置条目
@@ -376,7 +377,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 | 优先级 | 来源 | 说明 |
 |--------|------|------|
 | 1 | EXIF DateTimeOriginal | 相机/手机写入的原始拍摄时间，最准确；仅图片文件读取，视频跳过 |
-| 2 | 文件名日期模式 | 自动识别 18 种预设模式（见下表），按优先级顺序逐个匹配 |
+| 2 | 文件名日期模式 | 自动识别 19 种预设模式（见下表），按优先级顺序逐个匹配 |
 | 3 | Unix 时间戳 | 文件名中的 13 位毫秒或 10 位秒级时间戳，年份限定在 2000-2099 |
 | 4 | 文件修改时间 | 以上全部失败时的兜底方案 |
 
@@ -404,6 +405,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 | 14 | `YYYY-MM-DD` | `2023-07-10-desc.mp4`（仅日期，时分默认 `0000`） |
 | 15 | `YYYYMMDDHHMMSS` | `IMG20220625102520.jpg`、`faceu_*_20201024204541523.jpg` |
 | 16 | `YYYYMMDD` | `20220502（1）.mp4`、`20220502.mp4`（仅日期） |
+| 19 | `DD-MM-YYYY HHMMSS` | `ScreenRecording_02-06-2026 154022.mp4`（iPhone 录屏，`group_order: DMYhms`） |
 
 > **date-only 模式**（ID 13、14、16）：仅提取到日期时，时分默认设为 `0000`。
 
@@ -444,7 +446,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
   → 模式 14 不再被尝试
 ```
 
-#### 当前 18 个模式的正确排列顺序
+#### 当前 19 个模式的正确排列顺序
 
 ```
 [自有输出格式]  ← 精确锚定，最先匹配
@@ -464,6 +466,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
   ID 17: YYYY-MM-DD-HHhMMmSS      (6组)  ← h/m 标记
   ID 18: YYYY-MM-DD-HHMMSSmmm     (6组)  ← 毫秒后缀
   ID 15: YYYYMMDDHHMMSS           (6组)  ← 全紧凑型，放最后（纯数字，误匹配风险最高）
+  ID 19: DD-MM-YYYY HHMMSS       (6组)  ← iPhone录屏（group_order: DMYhms）
 
 [5 组 / 3 组低精度模式]  ← 只有日期+分或纯日期
   ID 12: YYYY年MM月DD日 HH点MM分   (5组)
@@ -496,6 +499,73 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 
 **视频（13 种）**：`.mp4` `.mov` `.avi` `.mkv` `.3gp` `.wmv` `.flv` `.webm` `.m4v` `.mts` `.m2ts` `.ts` `.mxf`
 
+### 设备与应用兼容性
+
+本工具通过文件名模式、Unix 时间戳和 EXIF 三条路径提取日期，兼容以下设备与应用：
+
+#### 安卓手机（全品牌通用）
+
+| 品牌 | 相机照片/视频 | 系统截图 | 系统录屏 | 提取方式 |
+|------|-------------|---------|---------|---------|
+| 小米 / Redmi | `IMG_YYYYMMDD_HHMMSS`、`PXL_YYYYMMDD_HHMMSS_XXXX` | `Screenshot_YYYYMMDD-HHMMSS` | `Screenrecorder_YYYYMMDD_HHMMSS` | 文件名模式 |
+| 华为 / 荣耀 | `IMG_YYYYMMDD_HHMMSS` | `Screenshot_YYYYMMDD-HHMMSS` | `ScreenRecord_YYYYMMDD_HHMMSS` | 文件名模式 |
+| vivo / iQOO | `IMG_YYYYMMDD_HHMMSS` | `Screenshot_YYYYMMDD-HHMMSS` | `ScreenRecord_YYYYMMDD_HHMMSS` | 文件名模式 |
+| OPPO / 一加 / realme | `IMG_YYYYMMDD_HHMMSS` | `Screenshot_YYYYMMDD-HHMMSS` | `ScreenRecord_YYYYMMDD_HHMMSS`（一加特例：`YYYY-MM-DD-HH-MM-SS`） | 文件名模式 |
+| 中兴 / 魅族 | `IMG_YYYYMMDD_HHMMSS` | `Screenshot_YYYYMMDD-HHMMSS` | `ScreenRecord_YYYYMMDD_HHMMSS` | 文件名模式 |
+
+> 安卓全品牌共享 `IMG_`/`VID_`/`Screenshot_`/`ScreenRecord` 前缀规范，工具已完整覆盖。
+
+#### 苹果 iPhone
+
+| 类型 | 命名规则 | 提取方式 |
+|------|---------|---------|
+| 相机照片 | `IMG_XXXX.HEIC`（4 位序列号，无日期） | **EXIF**（需 Pillow + pillow-heif） |
+| 相机视频 | `IMG_XXXX.MP4`（无日期） | **文件修改时间**（无 EXIF） |
+| 系统截图 | `IMG_XXXX.PNG`（无日期） | **EXIF**（iOS 15+ 截图含 EXIF） |
+| 系统录屏 | `ScreenRecording_DD-MM-YYYY HHMMSS.mp4` | **文件名模式**（ID 19，`DMYhms`） |
+
+> iPhone 原生相机照片/视频文件名不含日期信息，依赖 EXIF 或文件修改时间。建议安装 Pillow + pillow-heif 以获得最佳效果。
+
+#### 三星手机
+
+| 类型 | 命名规则 | 提取方式 |
+|------|---------|---------|
+| 相机/视频 | `IMG_YYYYMMDD_HHMMSS` | 文件名模式 |
+| 截图 | `Screenshot_YYYYMMDD-HHMMSS` | 文件名模式 |
+| 录屏 | `ScreenRecord_YYYYMMDD_HHMMSS` | 文件名模式 |
+
+#### 大疆（DJI）运动相机 / 无人机
+
+| 类型 | 命名规则 | 提取方式 |
+|------|---------|---------|
+| 新款（Action 3/4/5、Pocket 3 等） | `DJI_YYYYMMDDHHMMSS_XXXX_D` | 文件名模式（14 位紧凑时间戳） |
+| 老款（Action 2、Pocket 2 等） | `DJI_XXXX`（纯序列号） | **EXIF** / 文件修改时间 |
+
+#### 单反 / 微单相机
+
+| 品牌 | 命名规则 | 提取方式 |
+|------|---------|---------|
+| 佳能 EOS/R | `IMG_XXXX.CR3`、`MVI_XXXX.MOV` | **EXIF** |
+| 尼康 D/Z | `DSC_XXXX.NEF` | **EXIF** |
+| 索尼 A/RX | `DSCXXXX.ARW` | **EXIF** |
+| 富士 X/GFX | `DSCF_XXXX.RAF` | **EXIF** |
+| 松下 GH/S | `PXXXXXXX.RW2` | **EXIF** |
+
+> 单反/微单文件名均为序列号，不含日期。工具通过 EXIF 提取拍摄时间，需安装 Pillow。
+
+#### 社交软件保存资源
+
+| 应用 | 图片命名规则 | 视频命名规则 | 提取方式 |
+|------|------------|------------|---------|
+| 微信 | `mmexport` + 13 位时间戳 | 13 位纯数字 | Unix 时间戳（ms） |
+| 微信拍摄 | `wx_camera_` + 13 位时间戳 | 同左 | Unix 时间戳（ms） |
+| QQ | `QQImage_YYYYMMDD_HHMMSS` | `QQVideo_YYYYMMDD_HHMMSS` | 文件名模式 |
+| 微博 | `weibo_YYYYMMDD_HHMMSS` | `weibo_video_YYYYMMDD_HHMMSS` | 文件名模式 |
+| 抖音 | `douyin_YYYYMMDD_HHMMSS` | `抖音_YYYYMMDD_HHMMSS` | 文件名模式 |
+| 小红书 | `Camera_XHS_` + 13 位时间戳（嵌入长数字串） | — | Unix 时间戳（ms，App 前缀） |
+
+> QQ 截图保存为 `Screenshot_随机字符.png`，不含日期信息，需依赖文件修改时间。
+
 ---
 
 ## 注意事项
@@ -512,6 +582,13 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 ---
 
 ## 版本历史
+
+### v2.5（2026-06-02）
+
+- 新增 iPhone 录屏 `ScreenRecording_DD-MM-YYYY HHMMSS` 格式支持（`group_order: DMYhms`）
+- 引入 `group_order` 机制，支持非标准日期顺序的捕获组映射（`Y/M/D/h/m/s` 语义编码）
+- 模式总数增至 19 种，新增设备兼容性文档
+- patterns.json 版本号升至 v2.5
 
 ### v2.4（2026-05-26）
 
