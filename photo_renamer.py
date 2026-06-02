@@ -1793,7 +1793,7 @@ def _interactive_menu():
             continue
 
         if choice == '7':
-            src = _input_path('   源文件夹路径: ')
+            src = _input_path('   源文件夹路径（可直接拖拽文件夹到此处）: ')
             recursive = input('   包含子文件夹？(y/n，默认n): ').strip().lower() == 'y'
             mode = input('   模式 (preview/execute，默认preview): ').strip()
             if mode not in ('preview', 'execute'):
@@ -1816,7 +1816,7 @@ def _interactive_menu():
             }
 
         if choice in ('1', '2', '3', '4', '5', '6'):
-            src = _input_path('   源文件夹路径: ')
+            src = _input_path('   源文件夹路径（可直接拖拽文件夹到此处）: ')
             recursive = choice in ('2', '4')
             mode = 'preview' if choice in ('1', '2', '5') else 'execute'
             dedup = choice in ('5', '6')
@@ -1882,7 +1882,7 @@ def main():
   python photo_renamer.py -s "D:\\照片" -m execute --force     （跳过已重命名检查）
         ''')
 
-    parser.add_argument('-s', '--source', default='', help='源文件夹路径（不指定则进入交互菜单）')
+    parser.add_argument('-s', '--source', default='', help='源文件夹路径（不指定则进入交互菜单；交互模式下可直接拖拽）')
     parser.add_argument('-m', '--mode', choices=['preview', 'execute'], default='preview',
                         help='模式: preview=模拟预览(不改文件), execute=真正重命名')
     parser.add_argument('-r', '--recursive', action='store_true', help='递归处理子目录')
