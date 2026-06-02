@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 
+# Build artifacts
+build/
+photo_renamer.pyz
+
 # IDE / Dev
 .codebuddy/
 .workbuddy/
@@ -10,6 +14,7 @@ __pycache__/
 
 # Test data
 测试集/
+_test_discover/
 
 # Runtime output
 preview_report.csv
@@ -17,6 +22,7 @@ rename_log.csv
 dedup_preview.csv
 dedup_log.csv
 discover_patterns.csv
+debug.log
 
 # System
 .DS_Store

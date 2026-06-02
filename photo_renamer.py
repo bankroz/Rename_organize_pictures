@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Photo & Video Renamer v2.4
+Photo & Video Renamer v2.6
 按日期重命名照片和视频，优先级：EXIF → 文件名日期 → Unix时间戳 → 文件修改时间
 
 用法:
@@ -172,6 +172,8 @@ _DEFAULT_PATTERNS_CONFIG = [
 
 # 全局模式配置路径
 _PATTERN_CONFIG_PATH: Optional[str] = None
+# 从 patterns.json 加载的默认输出格式（可选，用户可自定义）
+_DEFAULT_OUTPUT_FORMAT: Optional[str] = None
 
 
 def set_pattern_config_path(path: str):
@@ -180,14 +182,21 @@ def set_pattern_config_path(path: str):
     _PATTERN_CONFIG_PATH = path
 
 
+def _get_exe_dir() -> Path:
+    """获取可执行文件所在目录（兼容 PyInstaller --onefile 打包）"""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
 def _find_config_path() -> Path:
-    """查找 patterns.json：优先自定义路径 → CWD → 脚本目录"""
+    """查找 patterns.json：优先自定义路径 → CWD → exe/脚本目录"""
     if _PATTERN_CONFIG_PATH:
         return Path(_PATTERN_CONFIG_PATH)
     cwd = Path.cwd() / 'patterns.json'
     if cwd.exists():
         return cwd
-    return Path(__file__).parent / 'patterns.json'
+    return _get_exe_dir() / 'patterns.json'
 
 
 def _from_default_patterns() -> list:
@@ -197,8 +206,12 @@ def _from_default_patterns() -> list:
 
 def _load_patterns_from_json(json_path: Path) -> list:
     """从 JSON 文件加载并编译模式，返回 [(compiled_regex, entry_dict), ...]"""
+    global _DEFAULT_OUTPUT_FORMAT
     with open(json_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
+
+    # 读取用户自定义的默认输出格式
+    _DEFAULT_OUTPUT_FORMAT = config.get('default_output_format', None)
 
     patterns = []
     for entry in config.get('patterns', []):
@@ -212,11 +225,12 @@ def generate_default_config(json_path: Path = None):
     if json_path is None:
         json_path = _find_config_path()
     config = {
-        "version": "2.0",
+        "version": "2.5",
+        "default_output_format": "%Y.%m.%d_%H%M",
         "_instructions": (
             "每个 pattern 包含: regex(正则表达式), group_count(捕获组数:3/5/6), "
             "description(描述), is_own_output(是否自有输出格式)。"
-            "捕获组默认按 年、月、日、时、分、秒 顺序（YMDHMS）。"
+            "捕获组默认按 年、月、日、时、分、秒 顺序（YMDhms）。"
             "若文件名日期顺序不同（如 iPhone 录屏 DD-MM-YYYY），可添加 "
             "group_order 字段指定顺序（如 'DMYhms'，字符含义: Y年 M月 D日 h时 m分 s秒）。"
             "添加新模式时按优先级排列（精确的在前），保存后重新运行即可生效。"
@@ -904,12 +918,33 @@ class PatternDiscoverer:
         if group_count not in (3, 5, 6):
             return None
 
-        return {
+        result = {
             "regex": ''.join(regex_parts),
             "group_count": group_count,
-            "description": ''.join(description_parts) + '（手动添加）',
+            "description": ''.join(description_parts) + '（自动发现）',
             "is_own_output": False,
         }
+
+        # 检测非标准 group_order（如 DD-MM-YYYY 需要设为 DMYhms）
+        field_order = []
+        for kind, _ in parts:
+            if kind == 'YYYY':
+                field_order.append('Y')
+            elif kind == 'MM':
+                field_order.append('M')
+            elif kind == 'DD':
+                field_order.append('D')
+            elif kind == 'HH':
+                field_order.append('h')
+            elif kind == 'SS':
+                field_order.append('s')
+        if field_order:
+            default_order = 'YMDhms'[:len(field_order)]
+            actual_order = ''.join(field_order)
+            if actual_order != default_order:
+                result['group_order'] = actual_order
+
+        return result
 
 
 # ╔══════════════════════════════════════════════════════════╗
@@ -1212,17 +1247,30 @@ class PhotoRenamer:
 # ║              CLI 入口                                    ║
 # ╚══════════════════════════════════════════════════════════╝
 
-def resolve_format(fmt_arg: str) -> str:
-    """解析格式参数：预设名 / 预设值 / 自定义 Python 日期格式"""
+def resolve_format(fmt_arg: str) -> tuple:
+    """解析格式参数：预设名 / 预设值 / 自定义 Python 日期格式
+
+    返回值: (format_str, is_valid)
+    - format_str: 解析后的 strftime 格式字符串
+    - is_valid:   True=合法格式, False=无法解析（将被拒绝）
+    """
     # 先看是否是预设名
     if fmt_arg in FORMAT_PRESETS:
-        return FORMAT_PRESETS[fmt_arg]
+        return FORMAT_PRESETS[fmt_arg], True
     # 再看是否是预设值（短路径匹配）
     for preset_name, preset_fmt in FORMAT_PRESETS.items():
         if fmt_arg == preset_fmt:
-            return preset_fmt
-    # 当作自定义格式
-    return fmt_arg
+            return preset_fmt, True
+    # 自定义格式：验证是否是合法 strftime 格式
+    # 合法格式至少应包含一个 % 格式符（%Y/%m/%d/%H/%M/%S 等）
+    if not re.search(r'%[a-zA-Z]', fmt_arg):
+        return fmt_arg, False
+    # 用一个测试日期实际调用 strftime，确认格式合法
+    try:
+        datetime(2026, 6, 2, 15, 20, 30).strftime(fmt_arg)
+    except (ValueError, TypeError):
+        return fmt_arg, False
+    return fmt_arg, True
 
 
 def _run_discover_mode(source_dir: Path, files: list, date_fmt: str, csv_arg: str):
@@ -1602,7 +1650,226 @@ def _run_dedup_mode(source_dir: Path, files: list, date_fmt: str,
             print(f'  日志已保存: {csv_path}')
 
 
+def _input_path(prompt: str) -> str:
+    """交互式输入路径（处理拖放引号、空路径回退 exe 目录）"""
+    raw = input(prompt).strip()
+    raw = raw.strip('"\'')
+    if not raw:
+        # 空路径 -> 使用 exe/脚本所在目录
+        return str(_get_exe_dir())
+    return raw
+
+
+def _show_error(title: str, message: str):
+    """显示错误弹窗（GUI 环境下使用 tkinter，否则打印到终端）"""
+    print(f'\n[ERROR] {title}: {message}')
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(title, message)
+        root.destroy()
+    except Exception:
+        pass  # tkinter 不可用时静默失败
+
+
+def _offer_new_patterns(source_dir: Path, files: list, date_fmt: str):
+    """处理完成后，检查未匹配文件，智能发现新模式并让用户确认添加到 patterns.json"""
+    # 收集未能提取日期的文件
+    unmatched = []
+    for fp in files:
+        dt, source = DateExtractor.extract(fp)
+        if dt is None:
+            unmatched.append(fp)
+
+    if not unmatched:
+        return
+
+    # 用启发式算法发现潜在日期格式
+    discoveries = PatternDiscoverer.discover(unmatched, existing_extractor=DateExtractor)
+
+    if not discoveries:
+        n = len(unmatched)
+        print(f'\n  [提示] 有 {n} 个文件未能提取日期，也未发现可识别的日期模式。')
+        if n <= 10:
+            for fp in unmatched:
+                print(f'    - {fp.name}')
+        return
+
+    discovered_count = sum(len(v) for v in discoveries.values())
+    print(f'\n{"=" * 60}')
+    print(f'  智能发现：检测到 {discovered_count} 个文件可能使用新的命名规则')
+    print(f'{"=" * 60}')
+
+    sig_order = sorted(discoveries.keys(), key=lambda s: (-len(discoveries[s]), s))
+
+    for sig in sig_order:
+        items = discoveries[sig]
+        print(f'\n  [{len(items)} 个文件] {sig}')
+        for item in items[:3]:
+            fname = item['file'].name
+            dt_str = item['datetime'].strftime('%Y-%m-%d %H:%M:%S')
+            print(f'    {fname} -> {dt_str}')
+        if len(items) > 3:
+            print(f'    ... 还有 {len(items) - 3} 个')
+
+    print(f'\n  是否将以上 {len(sig_order)} 种模式添加到 patterns.json？')
+    confirm = input('  输入 y 确认添加，其他键跳过: ').strip().lower()
+    if confirm != 'y':
+        print('  已跳过，下次运行仍会提示。')
+        return
+
+    # 添加到 patterns.json
+    config_path = _find_config_path()
+    if not config_path.exists():
+        print('  [ERROR] patterns.json 不存在，无法添加。')
+        return
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        patterns = config.get('patterns', [])
+        max_id = max((p.get('id', 0) for p in patterns), default=0)
+
+        added = 0
+        for sig in sig_order:
+            suggestion = PatternDiscoverer.generate_json_suggestion(sig)
+            if not suggestion:
+                print(f'  [SKIP] {sig}: 无法生成有效正则')
+                continue
+            max_id += 1
+            suggestion['id'] = max_id
+            # 用实际签名替换通用描述
+            suggestion['description'] = sig + '（自动发现）'
+            patterns.append(suggestion)
+            added += 1
+            print(f'  [+] 已添加模式 {max_id}: {sig}')
+
+        if added > 0:
+            config['patterns'] = patterns
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            print(f'\n  已成功添加 {added} 个新模式到 {config_path}')
+            print(f'  模式已重新加载，下次处理将自动识别这些文件。')
+            DateExtractor.reload_patterns()
+        else:
+            print('\n  未添加任何新模式。')
+
+    except Exception as e:
+        print(f'  [ERROR] 写入 patterns.json 失败: {e}')
+
+
+def _interactive_menu():
+    """无参数时的交互式菜单（双击 exe 时进入）"""
+    while True:
+        print()
+        print('=' * 58)
+        print('   Photo & Video Renamer v2.6')
+        print('=' * 58)
+        print()
+        print('   [1] 预览 - 单个文件夹')
+        print('   [2] 预览 - 含所有子文件夹')
+        print('   [3] 执行 - 单个文件夹（直接重命名）')
+        print('   [4] 执行 - 含所有子文件夹（直接重命名）')
+        print('   [5] 整理重复文件名 - 预览')
+        print('   [6] 整理重复文件名 - 执行')
+        print('   [7] 自定义参数运行')
+        print('   [8] 生成默认 patterns.json')
+        print('   [0] 退出')
+        print()
+        choice = input('   请选择 (0-8): ').strip()
+        print()
+
+        if choice == '0':
+            return None
+
+        if choice == '8':
+            config_path = Path.cwd() / 'patterns.json'
+            generate_default_config(config_path)
+            print('   已生成 patterns.json，请编辑后重新运行。')
+            input('   按回车返回菜单...')
+            continue
+
+        if choice == '7':
+            src = _input_path('   源文件夹路径: ')
+            recursive = input('   包含子文件夹？(y/n，默认n): ').strip().lower() == 'y'
+            mode = input('   模式 (preview/execute，默认preview): ').strip()
+            if mode not in ('preview', 'execute'):
+                mode = 'preview'
+            fmt = input('   日期格式（直接回车=默认）: ').strip()
+            outdir = input('   输出目录（留空=原地重命名）: ').strip()
+            csv_path = input('   CSV报告路径（留空=自动）: ').strip()
+            return {
+                'source': src,
+                'mode': mode,
+                'recursive': recursive,
+                'format': fmt,
+                'output_dir': outdir,
+                'csv': csv_path,
+                'ext': '',
+                'force': False,
+                'discover': False,
+                'pattern_config': '',
+                'dedup': False,
+            }
+
+        if choice in ('1', '2', '3', '4', '5', '6'):
+            src = _input_path('   源文件夹路径: ')
+            recursive = choice in ('2', '4')
+            mode = 'preview' if choice in ('1', '2', '5') else 'execute'
+            dedup = choice in ('5', '6')
+
+            if mode == 'execute':
+                print()
+                print('   ' + '!' * 52)
+                print('   警告！将对以下路径中的文件直接重命名：')
+                print(f'   {src}')
+                print('   此操作不可撤销！')
+                print('   ' + '!' * 52)
+                print()
+                confirm = input('   输入 yes 确认执行: ').strip().lower()
+                if confirm != 'yes':
+                    print('   已取消。')
+                    input('   按回车返回菜单...')
+                    continue
+
+            csv_auto = ''
+            if mode == 'preview' and not dedup:
+                csv_auto = str(Path(src) / 'preview_report.csv')
+            elif mode == 'preview' and dedup:
+                csv_auto = str(Path(src) / 'dedup_preview.csv')
+            elif dedup:
+                csv_auto = str(Path(src) / 'dedup_log.csv')
+
+            return {
+                'source': src,
+                'mode': mode,
+                'recursive': recursive,
+                'format': '',
+                'output_dir': '',
+                'csv': csv_auto,
+                'ext': '',
+                'force': False,
+                'discover': False,
+                'pattern_config': '',
+                'dedup': dedup,
+            }
+
+        print('   无效选项，请重新选择。')
+
+
 def main():
+    # Windows GBK 终端下 emoji/Unicode 字符会触发 UnicodeEncodeError
+    # 强制 stdout/stderr 使用 UTF-8 输出
+    if sys.platform == 'win32':
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, LookupError):
+            pass  # Python < 3.7 或无 reconfigure 方法，忽略
+
     parser = argparse.ArgumentParser(
         description='Photo & Video Renamer - 按日期重命名照片和视频',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1615,12 +1882,12 @@ def main():
   python photo_renamer.py -s "D:\\照片" -m execute --force     （跳过已重命名检查）
         ''')
 
-    parser.add_argument('-s', '--source', required=True, help='源文件夹路径')
+    parser.add_argument('-s', '--source', default='', help='源文件夹路径（不指定则进入交互菜单）')
     parser.add_argument('-m', '--mode', choices=['preview', 'execute'], default='preview',
                         help='模式: preview=模拟预览(不改文件), execute=真正重命名')
     parser.add_argument('-r', '--recursive', action='store_true', help='递归处理子目录')
-    parser.add_argument('-f', '--format', default='默认',
-                        help=f'输出格式。预设: {", ".join(FORMAT_PRESETS.keys())}；或自定义 Python 日期格式')
+    parser.add_argument('-f', '--format', default='',
+                        help=f'输出格式（不指定则使用 patterns.json 中的默认格式）。预设: {", ".join(FORMAT_PRESETS.keys())}；或自定义 Python 日期格式')
     parser.add_argument('-o', '--output-dir', default='', help='输出目录（复制模式），不指定则在原位置重命名')
     parser.add_argument('--csv', default='', help='预览模式导出 CSV 文件路径')
     parser.add_argument('-e', '--ext', default='', help='限制扩展名（逗号分隔），如 ".jpg,.png,.mp4"')
@@ -1644,163 +1911,249 @@ def main():
         print('请编辑该文件后重新运行程序即可。')
         sys.exit(0)
 
-    # ── 设置自定义模式配置路径 ───────────────────────
-    if args.pattern_config:
-        set_pattern_config_path(args.pattern_config)
+    is_interactive = not args.source
 
-    # ── 提前初始化 DateExtractor（触发模式加载） ─────
-    DateExtractor._ensure_initialized()
+    while True:
+        try:
 
-    # 验证源路径
-    source_dir = Path(args.source)
-    if not source_dir.is_dir():
-        print(f'[ERROR] 源文件夹不存在: {args.source}')
-        sys.exit(1)
+            # ── 无参数时进入交互菜单（双击 exe 时） ────────────
+            if not args.source:
+                opts = _interactive_menu()
+                args.source = opts['source']
+                args.mode = opts['mode']
+                args.recursive = opts['recursive']
+                args.format = opts['format']
+                args.output_dir = opts['output_dir']
+                args.csv = opts['csv']
+                args.ext = opts['ext']
+                args.force = opts['force']
+                args.discover = opts['discover']
+                args.pattern_config = opts['pattern_config']
+                args.dedup = opts['dedup']
 
-    # 解析格式
-    date_fmt = resolve_format(args.format)
-    # 处理 Windows cmd 下的 % 转义（%%Y → %Y）
-    if '%%' in date_fmt:
-        date_fmt = date_fmt.replace('%%', '%')
+            # ── 设置自定义模式配置路径 ───────────────────────
+            if args.pattern_config:
+                set_pattern_config_path(args.pattern_config)
 
-    # 解析扩展名
-    exts = None
-    if args.ext:
-        exts = {e.strip().lower() if e.startswith('.') else f'.{e.strip().lower()}'
-                for e in args.ext.split(',')}
+            # ── 提前初始化 DateExtractor（触发模式加载） ─────
+            DateExtractor._ensure_initialized()
 
-    # 输出目录验证
-    output_dir = args.output_dir
+            # 验证源路径
+            source_dir = Path(args.source)
+            if not source_dir.is_dir():
+                print(f'[ERROR] 源文件夹不存在: {args.source}')
+                if is_interactive:
+                    args.source = ''
+                    continue
+                sys.exit(1)
 
-    # 打印摘要
-    print('=' * 60)
-    print('  Photo & Video Renamer v2.4')
-    print('=' * 60)
-    print(f'  源文件夹:   {source_dir}')
-    print(f'  模式:       {"🔍 预览（不修改文件）" if args.mode == "preview" else "⚡ 执行重命名"}')
-    print(f'  子目录:     {"是" if args.recursive else "否"}')
-    print(f'  日期格式:   {date_fmt}')
-    print(f'  输出方式:   {"复制到: " + output_dir if output_dir else "原地重命名"}')
-    print(f'  扩展名:     {", ".join(sorted(exts)) if exts else "全部支持格式"}')
-    print(f'  I/O 超时:   {NETWORK_TIMEOUT}s（可通过环境变量 PHOTO_RENAMER_TIMEOUT 调整）')
-    print('=' * 60)
+            # 解析格式：优先级 -f 参数 > patterns.json default_output_format > 内置默认
+            fmt_arg = args.format if args.format else (_DEFAULT_OUTPUT_FORMAT or '默认')
+            date_fmt, fmt_valid = resolve_format(fmt_arg)
+            if not fmt_valid:
+                print(f'[ERROR] 无法识别的输出格式: {fmt_arg}')
+                print(f'  可用预设: {", ".join(FORMAT_PRESETS.keys())}')
+                print(f'  自定义格式示例: %Y.%m.%d_%H%M%S  %Y-%m-%d  %Y年%m月%d日')
+                if is_interactive:
+                    args.source = ''
+                    continue
+                sys.exit(1)
+            # 处理 Windows cmd 下的 % 转义（%%Y → %Y）
+            if '%%' in date_fmt:
+                date_fmt = date_fmt.replace('%%', '%')
 
-    # 创建 renamer 实例
-    renamer = PhotoRenamer(
-        source_dir=str(source_dir),
-        recursive=args.recursive,
-        fmt=date_fmt,
-        output_dir=output_dir,
-        exts=exts,
-    )
+            # 解析扩展名
+            exts = None
+            if args.ext:
+                exts = {e.strip().lower() if e.startswith('.') else f'.{e.strip().lower()}'
+                        for e in args.ext.split(',')}
 
-    # 扫描
-    print(f'\n正在扫描文件...')
-    files = renamer.scan_files()
-    print(f'找到 {len(files)} 个文件')
-    if not files:
-        print('没有找到可处理的文件。')
-        sys.exit(0)
+            # 输出目录验证
+            output_dir = args.output_dir
 
-    # ── 智能发现模式 ─────────────────────────────────
-    if args.discover:
-        _run_discover_mode(source_dir, files, date_fmt, args.csv)
-        sys.exit(0)
+            # 打印摘要
+            print('=' * 60)
+            print('  Photo & Video Renamer v2.6')
+            print('=' * 60)
+            print(f'  源文件夹:   {source_dir}')
+            print(f'  模式:       {"🔍 预览（不修改文件）" if args.mode == "preview" else "⚡ 执行重命名"}')
+            print(f'  子目录:     {"是" if args.recursive else "否"}')
+            print(f'  日期格式:   {date_fmt}')
+            print(f'  输出方式:   {"复制到: " + output_dir if output_dir else "原地重命名"}')
+            print(f'  扩展名:     {", ".join(sorted(exts)) if exts else "全部支持格式"}')
+            print(f'  I/O 超时:   {NETWORK_TIMEOUT}s（可通过环境变量 PHOTO_RENAMER_TIMEOUT 调整）')
+            print('=' * 60)
 
-    # ── 副本整理模式 ─────────────────────────────────
-    if args.dedup:
-        _run_dedup_mode(source_dir, files, date_fmt, args.mode, args.csv)
-        sys.exit(0)
+            # 创建 renamer 实例
+            renamer = PhotoRenamer(
+                source_dir=str(source_dir),
+                recursive=args.recursive,
+                fmt=date_fmt,
+                output_dir=output_dir,
+                exts=exts,
+            )
 
-    # ── 检测是否已重命名过 ─────────────────────────────
-    if files:
-        already_count = sum(1 for f in files
-                           if DateExtractor._is_already_renamed_stem(f.stem))
-        already_pct = already_count * 100 // len(files)
+            # 扫描
+            print(f'\n正在扫描文件...')
+            files = renamer.scan_files()
+            print(f'找到 {len(files)} 个文件')
+            if not files:
+                print('没有找到可处理的文件。')
+                if is_interactive:
+                    args.source = ''
+                    continue
+                sys.exit(0)
 
-        if already_count > 0:
-            # 统计已命名文件的类型分布
-            renamed_photos = sum(1 for f in files
-                                if f.suffix.lower() in IMAGE_EXTS
-                                and DateExtractor._is_already_renamed_stem(f.stem))
-            renamed_videos = already_count - renamed_photos
+            # ── 智能发现模式 ─────────────────────────────────
+            if args.discover:
+                _run_discover_mode(source_dir, files, date_fmt, args.csv)
+                if is_interactive:
+                    args.source = ''
+                    continue
+                sys.exit(0)
 
-            print(f'\n{"=" * 60}')
-            print(f'  ⚠ 检测到 {already_count}/{len(files)} ({already_pct}%) 的文件可能已被本工具处理过')
-            if renamed_photos > 0:
-                print(f'     其中照片: {renamed_photos} 个')
-            if renamed_videos > 0:
-                print(f'     其中视频: {renamed_videos} 个')
-            print(f'{"=" * 60}')
-            print(f'  重新处理风险：')
-            print(f'  • 照片：EXIF 信息不变，通常安全')
-            print(f'  • 视频：无 EXIF，依赖文件名解析，时分信息可能被错误修改')
-            print(f'{"=" * 60}')
+            # ── 副本整理模式 ─────────────────────────────────
+            if args.dedup:
+                _run_dedup_mode(source_dir, files, date_fmt, args.mode, args.csv)
+                if is_interactive:
+                    args.source = ''
+                    continue
+                sys.exit(0)
 
-            if args.mode == 'execute' and not args.force:
-                print(f'\n  ⛔ 为保护数据，执行模式已自动中止。')
-                print(f'  如需继续，请检查预览结果确认无误后，使用 --force 重新执行：')
-                print(f'  python photo_renamer.py -s "{args.source}" -m execute --force')
-                if args.recursive:
-                    print(f'    或: python photo_renamer.py -s "{args.source}" -m execute -r --force')
-                sys.exit(2)
-            elif args.mode == 'execute' and args.force:
-                print(f'  ⚡ --force 已启用，跳过保护检查，继续执行...')
-            else:
-                print(f'  🔍 预览模式下仅展示结果，不会修改文件。')
-                print(f'     请仔细检查视频文件的日期是否正确。')
-            print()
+            # ── 检测是否已重命名过 ─────────────────────────────
+            if files:
+                already_count = sum(1 for f in files
+                                   if DateExtractor._is_already_renamed_stem(f.stem))
+                already_pct = already_count * 100 // len(files)
 
-    # 预览模式
-    if args.mode == 'preview':
-        results = renamer.process(mode='preview')
-        print(f'\n{"─" * 80}')
-        print(f'  {"原文件名":<50} {"→ 新文件名":>30}')
-        print(f'{"─" * 80}')
+                if already_count > 0:
+                    # 统计已命名文件的类型分布
+                    renamed_photos = sum(1 for f in files
+                                        if f.suffix.lower() in IMAGE_EXTS
+                                        and DateExtractor._is_already_renamed_stem(f.stem))
+                    renamed_videos = already_count - renamed_photos
 
-        ok_count = 0
-        for r in results:
-            src_name = Path(r['original']).name
-            status_icon = '⏱' if 'timeout' in r.get('source', '') else ('✓' if r['status'] == 'ok' else '✗')
-            if r['status'] == 'ok':
-                ok_count += 1
-                print(f'  {status_icon} {src_name:<47} → {r["new_name"]}')
-                print(f'    [{r["date"]}] 来源: {r["source"]}')
-            else:
-                reason = '超时（网络延迟）' if 'timeout' in r.get('source', '') else '无法提取日期'
-                print(f'  {status_icon} {src_name:<47} → {reason}')
+                    print(f'\n{"=" * 60}')
+                    print(f'  ⚠ 检测到 {already_count}/{len(files)} ({already_pct}%) 的文件可能已被本工具处理过')
+                    if renamed_photos > 0:
+                        print(f'     其中照片: {renamed_photos} 个')
+                    if renamed_videos > 0:
+                        print(f'     其中视频: {renamed_videos} 个')
+                    print(f'{"=" * 60}')
+                    print(f'  重新处理风险：')
+                    print(f'  • 照片：EXIF 信息不变，通常安全')
+                    print(f'  • 视频：无 EXIF，依赖文件名解析，时分信息可能被错误修改')
+                    print(f'{"=" * 60}')
 
-        print(f'{"─" * 80}')
-        print(f'  成功: {ok_count}/{len(results)}')
+                    if args.mode == 'execute' and not args.force:
+                        print(f'\n  ⛔ 为保护数据，执行模式已自动中止。')
+                        print(f'  如需继续，请检查预览结果确认无误后，使用 --force 重新执行：')
+                        print(f'  python photo_renamer.py -s "{args.source}" -m execute --force')
+                        if args.recursive:
+                            print(f'    或: python photo_renamer.py -s "{args.source}" -m execute -r --force')
+                        if is_interactive:
+                            args.source = ''
+                            continue
+                        sys.exit(2)
+                    elif args.mode == 'execute' and args.force:
+                        print(f'  ⚡ --force 已启用，跳过保护检查，继续执行...')
+                    else:
+                        print(f'  🔍 预览模式下仅展示结果，不会修改文件。')
+                        print(f'     请仔细检查视频文件的日期是否正确。')
+                    print()
 
-        # 写入 CSV
-        csv_path = args.csv
-        if not csv_path:
-            csv_path = str(source_dir / 'preview_report.csv')
-        renamer.write_csv(csv_path)
-        print(f'\n预览报告已保存: {csv_path}')
+            # 预览模式
+            if args.mode == 'preview':
+                results = renamer.process(mode='preview')
+                print(f'\n{"─" * 80}')
+                print(f'  {"原文件名":<50} {"→ 新文件名":>30}')
+                print(f'{"─" * 80}')
 
-    # 执行模式
-    elif args.mode == 'execute':
-        success = renamer.execute()
-        total = len(files)
+                ok_count = 0
+                for r in results:
+                    src_name = Path(r['original']).name
+                    status_icon = '⏱' if 'timeout' in r.get('source', '') else ('✓' if r['status'] == 'ok' else '✗')
+                    if r['status'] == 'ok':
+                        ok_count += 1
+                        print(f'  {status_icon} {src_name:<47} → {r["new_name"]}')
+                        print(f'    [{r["date"]}] 来源: {r["source"]}')
+                    else:
+                        reason = '超时（网络延迟）' if 'timeout' in r.get('source', '') else '无法提取日期'
+                        print(f'  {status_icon} {src_name:<47} → {reason}')
 
-        # 打印结果
-        print(f'\n{"─" * 80}')
-        errors = [r for r in renamer.results if r['status'] != 'ok']
-        for r in errors:
-            print(f'  ✗ {Path(r["original"]).name}: {r.get("error", "无法提取日期")}')
+                print(f'{"─" * 80}')
+                print(f'  成功: {ok_count}/{len(results)}')
 
-        print(f'\n{"─" * 80}')
-        print(f'  完成: {success}/{total} 个文件已处理')
-        if errors:
-            print(f'  失败: {len(errors)} 个')
+                # 写入 CSV
+                csv_path = args.csv
+                if not csv_path:
+                    csv_path = str(source_dir / 'preview_report.csv')
+                renamer.write_csv(csv_path)
+                print(f'\n预览报告已保存: {csv_path}')
 
-        # 导出执行报告
-        csv_path = str(source_dir / 'rename_log.csv')
-        renamer.write_csv(csv_path)
-        print(f'  日志已保存: {csv_path}')
+            # 执行模式
+            elif args.mode == 'execute':
+                success = renamer.execute()
+                total = len(files)
 
+                # 打印结果
+                print(f'\n{"─" * 80}')
+                errors = [r for r in renamer.results if r['status'] != 'ok']
+                for r in errors:
+                    print(f'  ✗ {Path(r["original"]).name}: {r.get("error", "无法提取日期")}')
+
+                print(f'\n{"─" * 80}')
+                print(f'  完成: {success}/{total} 个文件已处理')
+                if errors:
+                    print(f'  失败: {len(errors)} 个')
+
+                # 导出执行报告
+                csv_path = str(source_dir / 'rename_log.csv')
+                renamer.write_csv(csv_path)
+                print(f'  日志已保存: {csv_path}')
+
+
+
+        except SystemExit:
+            if is_interactive:
+                args.source = ''
+                continue
+            raise
+
+        except KeyboardInterrupt:
+            if is_interactive:
+                print('\n\n  已取消当前操作。')
+                args.source = ''
+                continue
+            raise
+
+        except Exception as e:
+            _show_error('处理出错', str(e))
+            if is_interactive:
+                args.source = ''
+                input('\n按回车键返回菜单...')
+                continue
+            raise
+
+        # ── 交互模式：智能发现新规则 + 返回菜单 ──
+        if is_interactive:
+            try:
+                _offer_new_patterns(source_dir, files, date_fmt)
+            except Exception:
+                pass  # 智能发现失败不影响主流程
+            input('\n按回车键返回菜单...')
+            args.source = ''  # 重置，下次循环回到菜单
+            continue
+
+        break  # CLI 模式：处理完毕退出
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        _show_error('程序异常', str(e))
+        input('\n程序异常终止，按回车键退出...')
