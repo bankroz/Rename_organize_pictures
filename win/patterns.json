@@ -1,0 +1,142 @@
+{
+  "version": "2.6",
+  "default_output_format": "%Y.%m.%d_%H%M",
+  "_instructions_default_format": "默认输出命名格式（strftime 格式字符串）。预设名: 默认=%Y.%m.%d_%H%M, 精确到秒=%Y.%m.%d_%H%M%S, 中划线分隔=%Y-%m-%d_%H-%M-%S, 紧凑型=%Y%m%d_%H%M%S。也可使用自定义 strftime 格式（如 %Y年%m月%d日_%H%M%S）。运行时 -f 参数优先级更高。",
+  "_instructions": "每个 pattern 包含: regex(正则表达式), group_count(捕获组数:3/5/6), description(描述), is_own_output(是否自有输出格式)。捕获组默认按 年、月、日、时、分、秒 顺序（YMDhms）。若文件名日期顺序不同（如 iPhone 录屏 DD-MM-YYYY），可添加 group_order 字段指定顺序（如 'DMYhms'，字符含义: Y年 M月 D日 h时 m分 s秒）。添加新模式时按优先级排列（精确的在前），保存后重新运行即可生效。",
+  "patterns": [
+    {
+      "id": 1,
+      "regex": "^(\\d{4})\\.(\\d{2})\\.(\\d{2})_(\\d{2})(\\d{2})(\\d{2})$",
+      "group_count": 6,
+      "description": "YYYY.MM.DD_HHMMSS（自有输出格式-精确到秒）",
+      "is_own_output": true
+    },
+    {
+      "id": 2,
+      "regex": "^(\\d{4})\\.(\\d{2})\\.(\\d{2})_(\\d{2})(\\d{2})$",
+      "group_count": 5,
+      "description": "YYYY.MM.DD_HHMM（自有输出格式-默认）",
+      "is_own_output": true
+    },
+    {
+      "id": 3,
+      "regex": "^(\\d{4})-(\\d{2})-(\\d{2})_(\\d{2})-(\\d{2})-(\\d{2})$",
+      "group_count": 6,
+      "description": "YYYY-MM-DD_HH-MM-SS（自有输出格式-中划线）",
+      "is_own_output": true
+    },
+    {
+      "id": 4,
+      "regex": "(\\d{4})(\\d{2})(\\d{2})_(\\d{2})(\\d{2})(\\d{2})",
+      "group_count": 6,
+      "description": "YYYYMMDD_HHMMSS（自有输出格式-紧凑型，如 petal_20230928_143520）",
+      "is_own_output": true
+    },
+    {
+      "id": 5,
+      "regex": "(\\d{4})(\\d{2})(\\d{2})_(\\d{2})(\\d{2})(?!\\d)",
+      "group_count": 5,
+      "description": "YYYYMMDD_HHMM（下划线分隔-精确到分）",
+      "is_own_output": false
+    },
+    {
+      "id": 6,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2})_(\\d{2})(\\d{2})(\\d{2})",
+      "group_count": 6,
+      "description": "YYYY-MM-DD_HHMMSS（中划线日期+下划线时分秒，如 微信图片_2025-06-30_140243）",
+      "is_own_output": false
+    },
+    {
+      "id": 7,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2})_(\\d{2})(\\d{2})(?!\\d)",
+      "group_count": 5,
+      "description": "YYYY-MM-DD_HHMM（中划线日期+下划线时分）",
+      "is_own_output": false
+    },
+    {
+      "id": 8,
+      "regex": "(\\d{4})(\\d{2})(\\d{2})-(\\d{2})(\\d{2})(\\d{2})",
+      "group_count": 6,
+      "description": "YYYYMMDD-HHMMSS（日期紧凑+中划线时分秒）",
+      "is_own_output": false
+    },
+    {
+      "id": 9,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2})-(\\d{2})-(\\d{2})-(\\d{2})",
+      "group_count": 6,
+      "description": "YYYY-MM-DD-HH-MM-SS（全中划线分隔，如 Screenshot_2024-06-15-14-30-22）",
+      "is_own_output": false
+    },
+    {
+      "id": 10,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2}) (\\d{2})-(\\d{2})-(\\d{2})",
+      "group_count": 6,
+      "description": "YYYY-MM-DD HH-MM-SS（空格分隔，如 2015-12-04 15-39-11-desc）",
+      "is_own_output": false
+    },
+    {
+      "id": 11,
+      "regex": "(\\d{4})_(\\d{2})_(\\d{2})_(\\d{2})(\\d{2})(\\d{2})",
+      "group_count": 6,
+      "description": "YYYY_MM_DD_HHMMSS（全下划线分隔，如 HwVideoEditor_2020_08_22_175855）",
+      "is_own_output": false
+    },
+    {
+      "id": 17,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2})-(\\d{2})h(\\d{2})m(\\d{2})",
+      "group_count": 6,
+      "description": "YYYY-MM-DD-HHhMMmSS（中划线日期+h/m时分秒，如 2016-04-03-20h52m50）",
+      "is_own_output": false
+    },
+    {
+      "id": 18,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2})-(\\d{2})(\\d{2})(\\d{2})\\d{3}",
+      "group_count": 6,
+      "description": "YYYY-MM-DD-HHMMSSmmm（中划线日期+紧凑时分秒毫秒，如 2019-12-16-181315963）",
+      "is_own_output": false
+    },
+    {
+      "id": 12,
+      "regex": "(\\d{4})年(\\d{2})月(\\d{2})日 (\\d{2})点(\\d{2})分",
+      "group_count": 5,
+      "description": "YYYY年MM月DD日 HH点MM分",
+      "is_own_output": false
+    },
+    {
+      "id": 13,
+      "regex": "(\\d{4})\\.(\\d{2})\\.(\\d{2})",
+      "group_count": 3,
+      "description": "YYYY.MM.DD（点分隔，如 2025.01.15-三人跳舞）",
+      "is_own_output": false
+    },
+    {
+      "id": 14,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2})",
+      "group_count": 3,
+      "description": "YYYY-MM-DD（纯中划线日期）",
+      "is_own_output": false
+    },
+    {
+      "id": 15,
+      "regex": "(\\d{4})(\\d{2})(\\d{2})(\\d{2})(\\d{2})(\\d{2})",
+      "group_count": 6,
+      "description": "YYYYMMDDHHMMSS（紧凑型全部连接，如 IMG20220625102520, faceu_..._20201024204541523）",
+      "is_own_output": false
+    },
+    {
+      "id": 16,
+      "regex": "(\\d{4})(\\d{2})(\\d{2})",
+      "group_count": 3,
+      "description": "YYYYMMDD（纯8位日期，如 20220502（1））",
+      "is_own_output": false
+    },
+    {
+      "id": 19,
+      "regex": "(\\d{2})-(\\d{2})-(\\d{4}) (\\d{2})(\\d{2})(\\d{2})",
+      "group_count": 6,
+      "description": "DD-MM-YYYY HHMMSS（iPhone录屏，如 ScreenRecording_02-06-2026 154022）",
+      "is_own_output": false,
+      "group_order": "DMYhms"
+    }
+  ]
+}
