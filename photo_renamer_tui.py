@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Textual UI for Photo & Video Renamer  v2.8
+Textual UI for Photo & Video Renamer  v2.9
 
 视觉风格：接近 Windows 经典浅色 GUI
 - 浅灰背景 + 白色面板 + 深蓝高亮
-- 勾选状态显示 ✓ 而非 x
-- 输出格式改为下拉选择器（Select 组件）
+- Checkbox 勾选状态显示 ✓ 而非 X（重写 BUTTON_INNER）
+- 输出格式下拉，选中时右侧摘要区实时预览重命名示例
 - CSV 路径不再手动填写，默认存到目标目录；子目录各自生成独立 CSV
 - 预览 / 执行 / 撤销 固定实体按钮，始终可见
+- 所有 Input/Select 宽度限制在侧边栏内，不越界
 
 Usage:
     python photo_renamer.py --tui
@@ -24,6 +25,7 @@ Usage:
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from textual import on
@@ -31,9 +33,10 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.theme import Theme
 from textual.widgets import (
-    Button, Checkbox, DataTable, Footer, Header,
+    Button, DataTable, Footer, Header,
     Input, Label, Select, Static,
 )
+from textual.widgets import Checkbox as _BaseCheckbox
 
 from photo_renamer import (
     RenameJobOptions,
@@ -47,6 +50,13 @@ from photo_renamer import (
     undo_from_csv,
     write_undo_report,
 )
+
+
+# ── 修复 Checkbox 显示 ✓ 而非 X ────────────────────────────────────────────
+class Checkbox(_BaseCheckbox):
+    """覆盖 BUTTON_INNER，让勾选框显示 ✓ 而非 X。"""
+    BUTTON_INNER: str = "✓"
+
 
 # ── Windows 浅色主题颜色定义 ─────────────────────────────────────────────────
 WIN_THEME = Theme(
@@ -91,7 +101,7 @@ def open_folder(path: str) -> str:
         return f'打开文件夹失败: {e}'
 
 
-def _build_format_options() -> list[tuple[str, str]]:
+def _build_format_options() -> tuple[list[tuple[str, str]], str]:
     """返回 Select 组件所需的 (label, value) 元组列表，来自 load_format_profiles()。"""
     try:
         profiles = load_format_profiles()
@@ -110,10 +120,19 @@ def _build_format_options() -> list[tuple[str, str]]:
     return options, current_value
 
 
+def _format_example(fmt: str) -> str:
+    """用当前时间生成格式示例，如 2024.06.15_1430。"""
+    try:
+        now = datetime.now()
+        return now.strftime(fmt)
+    except Exception:
+        return f'（无效格式: {fmt}）'
+
+
 class PhotoRenamerApp(App):
     """Photo & Video Renamer — Windows 风格 TUI"""
 
-    TITLE = 'Photo & Video Renamer  v2.8'
+    TITLE = 'Photo & Video Renamer  v2.9'
     CSS_PATH = None
 
     # 内联 CSS：浅色 Windows 风格
@@ -142,11 +161,48 @@ class PhotoRenamerApp(App):
 
     /* ── 左侧边栏 ── */
     #sidebar {
-        width: 40;
-        min-width: 36;
+        width: 38;
+        min-width: 34;
+        max-width: 40;
         padding: 1 1;
         background: $panel;
         border-right: solid $primary;
+        overflow-y: auto;
+        overflow-x: hidden;
+    }
+
+    /* ── 侧边栏内所有输入组件最大宽度限制，防止越界 ── */
+    #sidebar Input {
+        width: 100%;
+        max-width: 36;
+        margin-bottom: 1;
+        background: white;
+        border: tall $border;
+        color: $foreground;
+    }
+
+    #sidebar Input:focus {
+        border: tall $primary;
+    }
+
+    #sidebar Select {
+        width: 100%;
+        max-width: 36;
+        margin-bottom: 1;
+        background: white;
+        border: tall $border;
+    }
+
+    #sidebar Select:focus {
+        border: tall $primary;
+    }
+
+    #sidebar Checkbox {
+        width: 100%;
+        max-width: 36;
+        margin-bottom: 1;
+        color: $foreground;
+        background: transparent;
     }
 
     /* ── 右侧工作区 ── */
@@ -162,49 +218,23 @@ class PhotoRenamerApp(App):
         margin-top: 1;
         margin-bottom: 0;
         padding: 0 0;
+        width: 100%;
     }
 
     .sec-divider {
         color: $primary;
         margin-top: 0;
         margin-bottom: 1;
-    }
-
-    /* ── 输入框 ── */
-    Input {
-        background: white;
-        border: tall $border;
-        margin-bottom: 1;
-        color: $foreground;
-    }
-
-    Input:focus {
-        border: tall $primary;
-    }
-
-    /* ── Select 下拉 ── */
-    Select {
-        margin-bottom: 1;
-        background: white;
-        border: tall $border;
-    }
-
-    Select:focus {
-        border: tall $primary;
-    }
-
-    /* ── 复选框：使用原生 Checkbox，label 颜色调亮 ── */
-    Checkbox {
-        margin-bottom: 1;
-        color: $foreground;
-        background: transparent;
+        width: 100%;
     }
 
     /* ── 主操作按钮行（固定显示） ── */
     #action-row {
         height: 3;
-        margin-bottom: 1;
+        margin-top: 1;
+        margin-bottom: 0;
         dock: bottom;
+        width: 100%;
     }
 
     #action-row Button {
@@ -219,6 +249,7 @@ class PhotoRenamerApp(App):
     /* ── 侧边栏其他按钮 ── */
     .tool-btn {
         width: 100%;
+        max-width: 36;
         margin-bottom: 1;
         background: $panel;
         border: tall $border;
@@ -234,12 +265,14 @@ class PhotoRenamerApp(App):
     .fmt-row {
         height: 3;
         margin-bottom: 1;
+        width: 100%;
     }
 
     .fmt-row Input {
         width: 1fr;
         margin-right: 1;
         margin-bottom: 0;
+        max-width: 18;
     }
 
     .fmt-row Input:last-of-type {
@@ -248,12 +281,13 @@ class PhotoRenamerApp(App):
 
     /* ── 摘要区 ── */
     #summary {
-        height: 7;
+        height: 8;
         padding: 1;
         margin-bottom: 1;
         border: solid $primary;
         background: #eaf4fb;
         color: $foreground;
+        overflow-y: auto;
     }
 
     /* ── 结果表格 ── */
@@ -298,6 +332,7 @@ class PhotoRenamerApp(App):
         self._format_profiles: list = []
         self._history_rows: list = []
         self._last_csv_path: str = ''   # 最近一次执行生成的 CSV，供撤销使用
+        self._ui_mode: str = 'idle'  # idle / rename / undo / rules / formats / history
 
     # ────────────────────────────────────────────────────────
     # compose — 界面布局
@@ -331,19 +366,19 @@ class PhotoRenamerApp(App):
                 yield Button('📋 格式管理',     id='formats_button', classes='tool-btn')
                 yield Button('📁 历史报告',     id='history_button', classes='tool-btn')
 
-                # 格式快捷新增（默认折叠，点格式管理后可用）
-                yield Label('▶ 新增自定义格式', classes='sec-title', id='fmt_sec_label')
+                # 格式快捷新增
+                yield Label('▶ 新增/编辑格式', classes='sec-title', id='fmt_sec_label')
                 with Horizontal(classes='fmt-row'):
-                    yield Input(placeholder='格式名称', id='fmt_name_input')
-                    yield Input(placeholder='如 %Y%m%d_%H%M', id='fmt_expr_input')
+                    yield Input(placeholder='名称', id='fmt_name_input')
+                    yield Input(placeholder='%Y%m%d_%H%M', id='fmt_expr_input')
                 yield Button('💾 保存格式', id='save_format_button', classes='tool-btn')
                 yield Button('✅ 设为当前格式', id='set_current_button', classes='tool-btn')
 
                 # ── 固定操作按钮（dock=bottom 模拟固定） ────
                 with Horizontal(id='action-row'):
-                    yield Button('▶ 预览 [P]',   id='preview_button',  variant='primary')
-                    yield Button('✔ 执行 [E]',   id='execute_button',  variant='success')
-                    yield Button('↩ 撤销 [U]',   id='undo_button',     variant='warning')
+                    yield Button('▶ 预览 [P]', id='preview_button',  variant='primary')
+                    yield Button('✔ 执行 [E]', id='execute_button',  variant='success')
+                    yield Button('↩ 撤销 [U]', id='undo_button',     variant='warning')
 
             # ── 右侧工作区 ──────────────────────────────────
             with Vertical(id='workspace'):
@@ -400,11 +435,10 @@ class PhotoRenamerApp(App):
         '已恢复为': 36,
         '说明':   28,
         # 规则发现列
-        '签名':   24,
+        '签名':   28,
         '数量':   6,
-        '示例文本': 30,
-        '建议正则': 34,
-        '操作提示': 20,
+        '示例文本': 32,
+        '建议正则': 36,
         # 格式管理列
         '当前':   5,
         '名称':   16,
@@ -451,6 +485,26 @@ class PhotoRenamerApp(App):
         )
 
     # ────────────────────────────────────────────────────────
+    # 输出格式选中时显示预览示例
+    # ────────────────────────────────────────────────────────
+
+    @on(Select.Changed, '#format_select')
+    def _on_format_changed(self, event: Select.Changed):
+        """选中输出格式后，在摘要区显示当前时间的重命名示例。"""
+        fmt = str(event.value) if event.value else ''
+        if not fmt:
+            return
+        example = _format_example(fmt)
+        source = self._get_source()
+        source_tip = f'\n源文件夹: {source}' if source else ''
+        self._summary(
+            f'输出格式预览\n'
+            f'格式: {fmt}\n'
+            f'示例（当前时间）: IMG_20240101_120000.jpg → {example}.jpg{source_tip}\n'
+            f'\n按 P 预览实际重命名效果。'
+        )
+
+    # ────────────────────────────────────────────────────────
     # 预览 / 执行
     # ────────────────────────────────────────────────────────
 
@@ -460,6 +514,7 @@ class PhotoRenamerApp(App):
             self._status('错误：请先填写源文件夹路径。')
             return
         self._status(f'{"预览" if mode=="preview" else "执行"}中，请稍候…')
+        self._ui_mode = 'rename'
         try:
             summary = run_rename_job(self._make_options(mode))
         except Exception as e:
@@ -471,14 +526,18 @@ class PhotoRenamerApp(App):
         total   = summary.get('files_count', 0)
         csv_p   = summary.get('csv_path', '')
         hist_p  = summary.get('history_path', '')
+        fmt     = self._get_format()
 
         if csv_p:
             self._last_csv_path = csv_p
 
         label = '预览' if mode == 'preview' else '执行重命名'
+        example = _format_example(fmt) if fmt else ''
+        example_line = f'格式示例: {example}.jpg\n' if example else ''
         self._summary(
             f'{label} 完成\n'
             f'扫描 {total} 个文件  ✓ 成功 {ok}  ✗ 冲突/错误 {err}\n'
+            f'{example_line}'
             f'CSV 日志: {csv_p or "（预览模式不生成 CSV）"}\n'
             f'历史记录: {hist_p or "—"}'
         )
@@ -501,6 +560,7 @@ class PhotoRenamerApp(App):
             self._status('暂无可撤销记录。请先执行一次重命名，或从历史报告选取 CSV 路径。')
             return
         self._status(f'撤销中：{csv_path}')
+        self._ui_mode = 'undo'
         try:
             summary     = undo_from_csv(csv_path)
             report_path = write_undo_report(csv_path, summary['details'])
@@ -555,6 +615,7 @@ class PhotoRenamerApp(App):
             self._status('错误：规则发现需要先填写源文件夹。')
             return
         self._status('扫描未知规则中…')
+        self._ui_mode = 'rules'
         try:
             suggestions = discover_rule_suggestions(source, recursive=self._get_recursive())
         except Exception as e:
@@ -562,7 +623,8 @@ class PhotoRenamerApp(App):
             return
 
         self._rule_suggestions = suggestions
-        table = self._set_result_columns('签名', '数量', '示例文本', '建议正则', '操作提示')
+        # 规则发现表格不含"操作提示"列，加入规则直接通过按钮操作
+        table = self._set_result_columns('签名', '数量', '示例文本', '建议正则')
         for item in suggestions[:200]:
             example = item['examples'][0]['match_text'] if item.get('examples') else ''
             regex   = (item.get('suggestion') or {}).get('regex', '')
@@ -571,31 +633,38 @@ class PhotoRenamerApp(App):
                 str(item['count']),
                 example,
                 regex,
-                '← 选中后点"加入规则"',
             )
         self._summary(
-            f'规则发现完成\n'
-            f'发现 {len(suggestions)} 种未匹配规则候选。\n'
-            f'选中某行，点"加入选中规则"写入 patterns.json。'
+            f'未知规则发现\n'
+            f'发现 {len(suggestions)} 种未匹配文件名规则候选。\n'
+            f'在下方表格中选中某行，\n'
+            f'点击"➕ 加入选中规则"将其写入 patterns.json。'
         )
-        self._status('候选规则已加载。选中行后点"加入选中规则"。')
+        self._status(f'发现 {len(suggestions)} 个候选规则。选中行后点"加入选中规则"。')
 
-        # 动态注入"加入规则"按钮
+        # 动态注入"加入规则"按钮（只注入一次）
         if not self.query('#add_rule_button'):
             btn = Button('➕ 加入选中规则', id='add_rule_button', classes='tool-btn', variant='warning')
             self.query_one('#sidebar').mount(btn, before=self.query_one('#rules_button'))
 
     @on(Button.Pressed, '#add_rule_button')
     def _on_add_rule(self):
+        """将选中的候选规则写入 patterns.json。"""
+        # 只在规则发现模式下处理
+        suggestions = self._rule_suggestions
+        if not suggestions:
+            self._status('请先点击"未知规则发现"扫描。')
+            return
+
         table = self.query_one('#results', DataTable)
-        if table.cursor_row is None or table.cursor_row < 0:
+        idx = table.cursor_row
+        if idx is None or idx < 0:
             self._status('请先在表格中点击选中一行候选规则。')
             return
-        suggestions = self._rule_suggestions
-        idx = table.cursor_row
         if idx >= len(suggestions):
-            self._status('选中行超出候选列表范围。')
+            self._status('选中行已超出候选列表范围，请重新扫描。')
             return
+
         sig = suggestions[idx]['signature']
         try:
             result = add_pattern_suggestion(sig)
@@ -605,13 +674,25 @@ class PhotoRenamerApp(App):
         if result is None:
             self._status(f'无法为签名 [{sig}] 生成规则（格式不可识别）。')
             return
+
         self._status(f'✓ 规则 [{sig}] 已写入 patterns.json（id={result["id"]}）。')
+
+        # 从候选列表和表格里移除该行，防止重复添加
+        suggestions.pop(idx)
         try:
+            row_key = table.get_row_at(idx)
             table.remove_row(table.cursor_row_key)
         except Exception:
             pass
-        if suggestions:
-            suggestions.pop(idx)
+
+        # 更新摘要
+        self._summary(
+            f'规则写入成功\n'
+            f'签名: {sig}\n'
+            f'规则 id: {result["id"]}\n'
+            f'剩余候选: {len(suggestions)} 个\n'
+            f'patterns.json 已热更新，下次预览即生效。'
+        )
 
     # ────────────────────────────────────────────────────────
     # 格式管理
@@ -619,6 +700,7 @@ class PhotoRenamerApp(App):
 
     @on(Button.Pressed, '#formats_button')
     def _on_formats(self):
+        self._ui_mode = 'formats'
         try:
             profiles = load_format_profiles()
         except Exception as e:
@@ -627,7 +709,6 @@ class PhotoRenamerApp(App):
 
         self._format_profiles = profiles
         table = self._set_result_columns('当前', '名称', '格式表达式', '类型', '示例')
-        from datetime import datetime
         sample = datetime(2024, 6, 15, 14, 30, 0)
         for p in profiles:
             is_cur = '✓' if p.get('current') else ''
@@ -641,21 +722,59 @@ class PhotoRenamerApp(App):
         self._summary(
             f'文件名格式管理\n'
             f'共 {len(profiles)} 个格式（含内置）。\n'
-            f'选中行后可填充到左侧输入框，点"保存格式"或"设为当前格式"。'
+            f'选中某行：左侧输入框自动填充，可直接编辑后保存。\n'
+            f'点"设为当前格式"立即生效。'
         )
         self._status('格式列表已加载。选中行后可编辑或设为当前。')
 
     @on(DataTable.RowSelected, '#results')
     def _on_row_selected(self, event: DataTable.RowSelected):
-        """选中格式行时自动填充名称/表达式输入框（仅格式管理模式有效）。"""
-        profiles = self._format_profiles
-        if not profiles:
-            return
+        """
+        选中行的处理：
+        - 格式管理模式：自动填充名称/表达式输入框
+        - 规则发现模式：在摘要区显示选中规则的详情
+        """
         idx = event.cursor_row
-        if idx is not None and 0 <= idx < len(profiles):
-            p = profiles[idx]
-            self.query_one('#fmt_name_input', Input).value = p.get('name', '')
-            self.query_one('#fmt_expr_input', Input).value = p.get('format', '')
+        if idx is None or idx < 0:
+            return
+
+        # 格式管理模式
+        profiles = self._format_profiles
+        if profiles and self._ui_mode == 'formats':
+            if 0 <= idx < len(profiles):
+                p = profiles[idx]
+                self.query_one('#fmt_name_input', Input).value = p.get('name', '')
+                self.query_one('#fmt_expr_input', Input).value = p.get('format', '')
+                # 同时在摘要区显示格式效果
+                fmt = p.get('format', '')
+                example = _format_example(fmt)
+                self._summary(
+                    f'格式预览\n'
+                    f'名称: {p.get("name", "")}\n'
+                    f'格式: {fmt}\n'
+                    f'示例（当前时间）: {example}.jpg\n'
+                    f'类型: {"内置" if p.get("builtin") else "自定义"}'
+                )
+            return
+
+        # 规则发现模式：摘要区显示规则详情
+        suggestions = self._rule_suggestions
+        if suggestions and self._ui_mode == 'rules':
+            if 0 <= idx < len(suggestions):
+                item = suggestions[idx]
+                examples = item.get('examples', [])
+                ex_text = '\n'.join(
+                    f'  {e["match_text"]}' for e in examples[:3]
+                )
+                regex = (item.get('suggestion') or {}).get('regex', '（无建议）')
+                self._summary(
+                    f'候选规则详情\n'
+                    f'签名: {item["signature"]}\n'
+                    f'匹配文件数: {item["count"]}\n'
+                    f'建议正则: {regex}\n'
+                    f'示例文件名:\n{ex_text}\n'
+                    f'确认无误后点"➕ 加入选中规则"写入 patterns.json。'
+                )
 
     @on(Button.Pressed, '#save_format_button')
     def _on_save_format(self):
@@ -669,7 +788,8 @@ class PhotoRenamerApp(App):
         except Exception as e:
             self._status(f'保存失败：{e}')
             return
-        self._status(f'✓ 格式 [{name}] 已保存。点"设为当前格式"立即启用。')
+        example = _format_example(expr)
+        self._status(f'✓ 格式 [{name}] 已保存，示例: {example}。点"设为当前格式"立即启用。')
         self._on_formats()
         self._refresh_format_select()
 
@@ -685,7 +805,8 @@ class PhotoRenamerApp(App):
         except Exception as e:
             self._status(f'设置失败：{e}')
             return
-        self._status(f'✓ 格式 [{name}] 已设为当前。')
+        example = _format_example(expr)
+        self._status(f'✓ 格式 [{name}] 已设为当前，示例: {example}。')
         self._on_formats()
         self._refresh_format_select()
 
@@ -706,6 +827,7 @@ class PhotoRenamerApp(App):
 
     @on(Button.Pressed, '#history_button')
     def _on_history(self):
+        self._ui_mode = 'history'
         try:
             rows = load_history_reports()
         except Exception as e:
@@ -727,7 +849,7 @@ class PhotoRenamerApp(App):
         self._summary(
             f'历史报告\n'
             f'共 {len(rows)} 条记录。\n'
-            f'选中行后点"打开 CSV 目录"跳转到文件管理器。'
+            f'选中行后点"📂 打开 CSV 目录"跳转到文件管理器。'
         )
         self._status('历史报告已加载。选中行后可打开 CSV 所在目录。')
 
