@@ -19,6 +19,7 @@ import re
 import shutil
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -29,20 +30,64 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # 全局超时配置（秒），可根据网络环境调整
 NETWORK_TIMEOUT = float(os.environ.get('PHOTO_RENAMER_TIMEOUT', '15'))
 
+INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
+WINDOWS_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *(f'COM{i}' for i in range(1, 10)),
+    *(f'LPT{i}' for i in range(1, 10)),
+}
+
+
+def _safe_stdout_write(text: str):
+    """Write text without crashing on legacy Windows console encodings."""
+    try:
+        sys.stdout.write(text)
+    except UnicodeEncodeError:
+        sys.stdout.write(text.encode('ascii', errors='replace').decode('ascii'))
+
 
 def run_with_timeout(func: Callable, *args, timeout: float = None,
                      default: Any = None, **kwargs) -> Any:
     """
     在独立线程中执行 func(*args, **kwargs)，超时返回 default。
-    使用 ThreadPoolExecutor 确保超时后线程被正确清理。
+    超时后不等待卡住的 I/O 线程结束，避免网络盘/损坏文件拖死主流程。
     """
     t = timeout if timeout is not None else NETWORK_TIMEOUT
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func, *args, **kwargs)
-        try:
-            return future.result(timeout=t)
-        except (concurrent.futures.TimeoutError, Exception):
-            return default
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func, *args, **kwargs)
+    try:
+        return future.result(timeout=t)
+    except (concurrent.futures.TimeoutError, Exception):
+        future.cancel()
+        return default
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def is_safe_filename_component(name: str) -> bool:
+    """Return True when name is safe to use as a single filename stem."""
+    if not name or name in ('.', '..'):
+        return False
+    if any(ch in INVALID_FILENAME_CHARS or ord(ch) < 32 for ch in name):
+        return False
+    if name.rstrip(' .') != name:
+        return False
+    if name.upper() in WINDOWS_RESERVED_NAMES:
+        return False
+    if '..' in name:
+        return False
+    return True
+
+
+def _escape_csv_cell(value):
+    """Prevent spreadsheet formula execution when opening CSV reports."""
+    if isinstance(value, str) and value[:1] in ('=', '+', '-', '@'):
+        return "'" + value
+    return value
+
+
+def _escape_csv_row(row: dict) -> dict:
+    return {key: _escape_csv_cell(value) for key, value in row.items()}
 
 
 # ─── 进度条（零依赖，自适应终端宽度） ──────────────────────
@@ -70,10 +115,10 @@ class ProgressBar:
             # 非交互终端：每 20% 打印一行
             if self.current == 1 or self.current >= self.total or self.current % max(1, self.total // 5) == 0:
                 pct = self.current * 100 // self.total
-                sys.stdout.write(f'  {self.desc}: {self.current}/{self.total} ({pct}%) [{elapsed_str}]')
+                _safe_stdout_write(f'  {self.desc}: {self.current}/{self.total} ({pct}%) [{elapsed_str}]')
                 if self.timeouts > 0:
-                    sys.stdout.write(f' 超时跳过: {self.timeouts}')
-                sys.stdout.write('\n')
+                    _safe_stdout_write(f' 超时跳过: {self.timeouts}')
+                _safe_stdout_write('\n')
                 sys.stdout.flush()
             return
 
@@ -90,7 +135,7 @@ class ProgressBar:
             line += ' ' * pad
         self._last_len = len(line)
 
-        sys.stdout.write(line)
+        _safe_stdout_write(line)
         sys.stdout.flush()
 
     def close(self):
@@ -98,12 +143,12 @@ class ProgressBar:
         elapsed = time.time() - self._start_time
         elapsed_str = f'{int(elapsed // 60)}m{int(elapsed % 60)}s'
         if not self.disable:
-            sys.stdout.write('\n')
+            _safe_stdout_write('\n')
             sys.stdout.flush()
-        sys.stdout.write(f'  ✓ {self.desc}完成: {self.current}/{self.total} [{elapsed_str}]')
+        _safe_stdout_write(f'  ✓ {self.desc}完成: {self.current}/{self.total} [{elapsed_str}]')
         if self.timeouts > 0:
-            sys.stdout.write(f'  超时跳过: {self.timeouts}')
-        sys.stdout.write('\n')
+            _safe_stdout_write(f'  超时跳过: {self.timeouts}')
+        _safe_stdout_write('\n')
         sys.stdout.flush()
 
 # ─── 依赖检测 ───────────────────────────────────────────
@@ -204,6 +249,32 @@ def _from_default_patterns() -> list:
     return [(re.compile(e['regex']), dict(e)) for e in _DEFAULT_PATTERNS_CONFIG]
 
 
+def _has_nested_quantifier(regex: str) -> bool:
+    """Detect obvious nested quantifiers that can cause catastrophic backtracking."""
+    return re.search(r'\((?:\\.|[^()])*[+*](?:\\.|[^()])*\)\s*(?:[+*]|\{\d)', regex) is not None
+
+
+def _validate_pattern_entry(entry: dict, index: int):
+    """Validate one user-editable pattern before compiling it."""
+    regex = entry.get('regex')
+    if not isinstance(regex, str) or not regex:
+        raise ValueError(f'第 {index} 个模式缺少 regex')
+    if len(regex) > 300:
+        raise ValueError(f'第 {index} 个模式 regex 过长')
+    if _has_nested_quantifier(regex):
+        raise ValueError(f'第 {index} 个模式包含危险嵌套量词')
+
+    group_count = entry.get('group_count')
+    if group_count not in (3, 5, 6):
+        raise ValueError(f'第 {index} 个模式 group_count 必须为 3/5/6')
+
+    group_order = entry.get('group_order', 'YMDhms')
+    if not isinstance(group_order, str) or len(group_order) < group_count:
+        raise ValueError(f'第 {index} 个模式 group_order 长度不足')
+    if any(ch not in 'YMDhms' for ch in group_order[:group_count]):
+        raise ValueError(f'第 {index} 个模式 group_order 含无效字段')
+
+
 def _load_patterns_from_json(json_path: Path) -> list:
     """从 JSON 文件加载并编译模式，返回 [(compiled_regex, entry_dict), ...]"""
     global _DEFAULT_OUTPUT_FORMAT
@@ -214,8 +285,11 @@ def _load_patterns_from_json(json_path: Path) -> list:
     _DEFAULT_OUTPUT_FORMAT = config.get('default_output_format', None)
 
     patterns = []
-    for entry in config.get('patterns', []):
+    for idx, entry in enumerate(config.get('patterns', []), start=1):
+        _validate_pattern_entry(entry, idx)
         compiled = re.compile(entry['regex'])
+        if compiled.groups < entry['group_count']:
+            raise ValueError(f'第 {idx} 个模式捕获组数量不足')
         patterns.append((compiled, dict(entry)))
     return patterns
 
@@ -1189,6 +1263,11 @@ class PhotoRenamer:
                 if self.output_dir:
                     # 复制模式（带超时保护的网络复制）
                     dst.parent.mkdir(parents=True, exist_ok=True)
+                    if dst.exists():
+                        r['status'] = 'conflict'
+                        r['error'] = f'目标文件已存在: {dst}'
+                        exec_pb.update(info='冲突')
+                        continue
                     result = run_with_timeout(shutil.copy2, str(src), str(dst),
                                               timeout=NETWORK_TIMEOUT * 2, default=None)
                     if result is None:
@@ -1236,11 +1315,326 @@ class PhotoRenamer:
 
     def write_csv(self, csv_path: str):
         """将结果写入 CSV 文件"""
-        fieldnames = ['original', 'new_name', 'date', 'source', 'status']
+        fieldnames = ['original', 'new_name', 'date', 'source', 'status', 'dst', 'error']
         with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
-            writer.writerows(self.results)
+            writer.writerows(_escape_csv_row(row) for row in self.results)
+
+
+def _resolve_undo_destination(row: dict) -> Path:
+    """Resolve the renamed path from new logs, with fallback for older CSV files."""
+    dst = row.get('dst') or row.get('new_path')
+    if dst:
+        return Path(dst)
+    original = Path(row.get('original', ''))
+    new_name = row.get('new_name', '')
+    return original.parent / new_name
+
+
+def undo_from_csv(csv_path: str, force: bool = False) -> dict:
+    """
+    Undo in-place renames from a rename CSV log.
+
+    Rows are processed in reverse order to avoid chain-conflict issues. By
+    default, undo is conservative: if the original path already exists, the row
+    is skipped instead of overwriting it.
+    """
+    path = Path(csv_path)
+    summary = {'restored': 0, 'skipped': 0, 'errors': 0, 'rows': 0, 'details': []}
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        rows = list(csv.DictReader(f))
+
+    summary['rows'] = len(rows)
+    for row in reversed(rows):
+        if row.get('status') != 'ok':
+            summary['skipped'] += 1
+            summary['details'].append({**row, 'undo_status': 'skipped', 'undo_error': '非成功记录'})
+            continue
+
+        original = Path(row.get('original', ''))
+        renamed = _resolve_undo_destination(row)
+        if not renamed.exists():
+            summary['skipped'] += 1
+            summary['details'].append({**row, 'undo_status': 'skipped', 'undo_error': f'目标不存在: {renamed}'})
+            continue
+        if original.exists() and not force:
+            summary['skipped'] += 1
+            summary['details'].append({**row, 'undo_status': 'skipped', 'undo_error': f'原路径已存在: {original}'})
+            continue
+
+        try:
+            if force and original.exists():
+                original.unlink()
+            original.parent.mkdir(parents=True, exist_ok=True)
+            renamed.rename(original)
+            summary['restored'] += 1
+            summary['details'].append({**row, 'undo_status': 'restored', 'undo_error': ''})
+        except Exception as e:
+            summary['errors'] += 1
+            summary['details'].append({**row, 'undo_status': 'error', 'undo_error': str(e)})
+
+    return summary
+
+
+def write_undo_report(csv_path: str, details: list):
+    """Write an undo report next to the source CSV."""
+    path = Path(csv_path)
+    report_path = path.with_name(path.stem + '_undo.csv')
+    fieldnames = ['original', 'new_name', 'date', 'source', 'status', 'dst', 'undo_status', 'undo_error']
+    with open(report_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(_escape_csv_row(row) for row in details)
+    return report_path
+
+
+def _load_config_document(config_path: str = '') -> dict:
+    path = Path(config_path) if config_path else _find_config_path()
+    if path.exists():
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {'patterns': _DEFAULT_PATTERNS_CONFIG}
+
+
+def _write_config_document(config: dict, config_path: str = '') -> Path:
+    path = Path(config_path) if config_path else _find_config_path()
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def discover_rule_suggestions(source_dir: str, recursive: bool = False,
+                              ext_arg: str = '') -> list:
+    """Return PatternDiscoverer suggestions in a TUI-friendly structure."""
+    DateExtractor._ensure_initialized()
+    renamer = PhotoRenamer(source_dir, recursive=recursive, exts=_parse_exts(ext_arg))
+    files = renamer.scan_files()
+    discoveries = PatternDiscoverer.discover(files, existing_extractor=DateExtractor)
+    suggestions = []
+    for sig in sorted(discoveries.keys(), key=lambda s: (-len(discoveries[s]), s)):
+        items = discoveries[sig]
+        suggestions.append({
+            'signature': sig,
+            'count': len(items),
+            'examples': [
+                {
+                    'file': str(item['file']),
+                    'match_text': item['match_text'],
+                    'datetime': item['datetime'].strftime('%Y-%m-%d %H:%M:%S'),
+                    'category': item.get('category', ''),
+                }
+                for item in items[:5]
+            ],
+            'suggestion': PatternDiscoverer.generate_json_suggestion(sig),
+        })
+    return suggestions
+
+
+def add_pattern_suggestion(signature: str, config_path: str = '') -> Optional[dict]:
+    """Append one generated pattern suggestion to patterns.json."""
+    suggestion = PatternDiscoverer.generate_json_suggestion(signature)
+    if not suggestion:
+        return None
+    config = _load_config_document(config_path)
+    patterns = config.setdefault('patterns', [])
+    max_id = max((p.get('id', 0) for p in patterns), default=0)
+    suggestion['id'] = max_id + 1
+    suggestion['description'] = signature + '（用户确认添加）'
+    _validate_pattern_entry(suggestion, len(patterns) + 1)
+    patterns.append(suggestion)
+    _write_config_document(config, config_path)
+    DateExtractor.reload_patterns(config_path)
+    return suggestion
+
+
+def load_format_profiles(config_path: str = '') -> list:
+    """Load built-in and custom output filename formats."""
+    config = _load_config_document(config_path)
+    current = config.get('default_output_format') or FORMAT_PRESETS['默认']
+    profiles = [
+        {'name': name, 'format': fmt, 'builtin': True, 'current': fmt == current or name == current}
+        for name, fmt in FORMAT_PRESETS.items()
+    ]
+    for item in config.get('output_formats', []):
+        fmt = item.get('format', '')
+        profiles.append({
+            'name': item.get('name', fmt),
+            'format': fmt,
+            'builtin': False,
+            'current': fmt == current or item.get('name') == current,
+        })
+    return profiles
+
+
+def save_format_profile(name: str, fmt: str, config_path: str = '',
+                        make_current: bool = False) -> dict:
+    """Add or update a custom filename format profile."""
+    if not name.strip():
+        raise ValueError('格式名称不能为空')
+    _, valid = resolve_format(fmt)
+    if not valid:
+        raise ValueError(f'非法文件名格式: {fmt}')
+
+    config = _load_config_document(config_path)
+    profiles = config.setdefault('output_formats', [])
+    existing = next((item for item in profiles if item.get('name') == name), None)
+    if existing:
+        existing['format'] = fmt
+        saved = existing
+    else:
+        saved = {'name': name, 'format': fmt}
+        profiles.append(saved)
+
+    if make_current:
+        config['default_output_format'] = fmt
+        global _DEFAULT_OUTPUT_FORMAT
+        _DEFAULT_OUTPUT_FORMAT = fmt
+
+    _write_config_document(config, config_path)
+    return saved
+
+
+def _default_history_path() -> Path:
+    return _get_exe_dir() / 'rename_history.csv'
+
+
+def append_history_report(summary: dict, history_path: str = '') -> Path:
+    """Append a lightweight operation history row."""
+    path = Path(history_path) if history_path else _default_history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    fieldnames = ['timestamp', 'mode', 'folder', 'files_count', 'ok_count', 'error_count', 'csv_path']
+    row = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'mode': summary.get('mode', ''),
+        'folder': summary.get('source_dir', ''),
+        'files_count': summary.get('files_count', 0),
+        'ok_count': summary.get('ok_count', 0),
+        'error_count': summary.get('error_count', 0),
+        'csv_path': summary.get('csv_path', ''),
+    }
+    with open(path, 'a', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        writer.writerow(_escape_csv_row(row))
+    return path
+
+
+def load_history_reports(history_path: str = '') -> list:
+    path = Path(history_path) if history_path else _default_history_path()
+    if not path.exists():
+        return []
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        return list(csv.DictReader(f))
+
+
+@dataclass
+class RenameJobOptions:
+    source_dir: str
+    mode: str = 'preview'
+    recursive: bool = False
+    fmt_arg: str = ''
+    output_dir: str = ''
+    csv_path: str = ''
+    ext_arg: str = ''
+    pattern_config: str = ''
+
+
+def _parse_exts(ext_arg: str) -> Optional[set]:
+    if not ext_arg:
+        return None
+    return {e.strip().lower() if e.strip().startswith('.') else f'.{e.strip().lower()}'
+            for e in ext_arg.split(',') if e.strip()}
+
+
+def _resolve_job_format(fmt_arg: str) -> str:
+    fmt_source = fmt_arg if fmt_arg else (_DEFAULT_OUTPUT_FORMAT or '默认')
+    date_fmt, fmt_valid = resolve_format(fmt_source)
+    if not fmt_valid:
+        raise ValueError(f'无法识别的输出格式: {fmt_source}')
+    if '%%' in date_fmt:
+        date_fmt = date_fmt.replace('%%', '%')
+    return date_fmt
+
+
+def run_rename_job(options: RenameJobOptions) -> dict:
+    """
+    Callable orchestration layer for CLI/TUI frontends.
+
+    It returns structured summary data while keeping PhotoRenamer as the core
+    engine. Textual should call this layer instead of driving main().
+    """
+    if options.mode not in ('preview', 'execute'):
+        raise ValueError('mode 必须为 preview 或 execute')
+
+    if options.pattern_config:
+        set_pattern_config_path(options.pattern_config)
+        DateExtractor.reload_patterns(options.pattern_config)
+    else:
+        DateExtractor._ensure_initialized()
+
+    source_dir = Path(options.source_dir)
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f'源文件夹不存在: {source_dir}')
+
+    date_fmt = _resolve_job_format(options.fmt_arg)
+    renamer = PhotoRenamer(
+        source_dir=str(source_dir),
+        recursive=options.recursive,
+        fmt=date_fmt,
+        output_dir=options.output_dir,
+        exts=_parse_exts(options.ext_arg),
+    )
+
+    files = renamer.scan_files()
+    if options.mode == 'preview':
+        results = renamer.process(mode='preview')
+        csv_path = options.csv_path or str(source_dir / 'preview_report.csv')
+        renamer.write_csv(csv_path)
+        ok_count = sum(1 for r in results if r.get('status') == 'ok')
+    else:
+        ok_count = renamer.execute()
+        results = renamer.results
+        csv_path = options.csv_path or str(source_dir / 'rename_log.csv')
+        renamer.write_csv(csv_path)
+
+    return {
+        'history_path': str(append_history_report({
+            'mode': options.mode,
+            'source_dir': str(source_dir),
+            'files_count': len(files),
+            'ok_count': ok_count,
+            'error_count': sum(1 for r in results if r.get('status') not in ('ok',)),
+            'csv_path': csv_path,
+        })) if options.mode == 'execute' else '',
+        'mode': options.mode,
+        'source_dir': str(source_dir),
+        'recursive': options.recursive,
+        'date_fmt': date_fmt,
+        'output_dir': options.output_dir,
+        'files_count': len(files),
+        'ok_count': ok_count,
+        'error_count': sum(1 for r in results if r.get('status') not in ('ok',)),
+        'csv_path': csv_path,
+        'results': results,
+    }
+
+
+def launch_tui():
+    """Launch the optional Textual UI."""
+    try:
+        from photo_renamer_tui import PhotoRenamerTuiApp
+    except ModuleNotFoundError as e:
+        if e.name == 'textual':
+            print('[ERROR] Textual 图形终端界面依赖未安装。')
+            print('        请先运行: pip install -r requirements-tui.txt')
+            return 1
+        raise
+
+    PhotoRenamerTuiApp().run()
+    return 0
 
 
 # ╔══════════════════════════════════════════════════════════╗
@@ -1267,8 +1661,10 @@ def resolve_format(fmt_arg: str) -> tuple:
         return fmt_arg, False
     # 用一个测试日期实际调用 strftime，确认格式合法
     try:
-        datetime(2026, 6, 2, 15, 20, 30).strftime(fmt_arg)
+        sample_name = datetime(2026, 6, 2, 15, 20, 30).strftime(fmt_arg)
     except (ValueError, TypeError):
+        return fmt_arg, False
+    if not is_safe_filename_component(sample_name):
         return fmt_arg, False
     return fmt_arg, True
 
@@ -1370,7 +1766,7 @@ def _run_discover_mode(source_dir: Path, files: list, date_fmt: str, csv_arg: st
         with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(csv_rows)
+            writer.writerows(_escape_csv_row(row) for row in csv_rows)
         print(f'\n{"─" * 80}')
         print(f'  发现报告已保存: {csv_path}')
 
@@ -1608,7 +2004,7 @@ def _run_dedup_mode(source_dir: Path, files: list, date_fmt: str,
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = _csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
-                writer.writerows(results)
+                writer.writerows(_escape_csv_row(row) for row in results)
             print(f'\n  预览报告已保存: {csv_path}')
 
     elif mode == 'execute':
@@ -1646,7 +2042,7 @@ def _run_dedup_mode(source_dir: Path, files: list, date_fmt: str,
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = _csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
-                writer.writerows(results)
+                writer.writerows(_escape_csv_row(row) for row in results)
             print(f'  日志已保存: {csv_path}')
 
 
@@ -1901,8 +2297,34 @@ def main():
                         help='副本整理模式：自动检测文件夹命名规律，将 (1)/(2) 副本文件插入到邻近空闲时间槽')
     parser.add_argument('--generate-config', action='store_true',
                         help='在当前位置生成默认 patterns.json 配置文件（然后退出）')
+    parser.add_argument('--undo-csv', default='',
+                        help='根据 rename_log.csv 撤销原地重命名（按日志倒序恢复）')
+    parser.add_argument('--undo-force', action='store_true',
+                        help='撤销时允许覆盖已存在的原路径（谨慎使用）')
+    parser.add_argument('--tui', action='store_true',
+                        help='启动 Textual 图形终端界面（需安装 requirements-tui.txt）')
 
     args = parser.parse_args()
+
+    if args.tui:
+        sys.exit(launch_tui())
+
+    # ── 撤销重命名（不需要源目录） ─────────────────────
+    if args.undo_csv:
+        summary = undo_from_csv(args.undo_csv, force=args.undo_force)
+        report_path = write_undo_report(args.undo_csv, summary['details'])
+        print('=' * 60)
+        print('  Photo & Video Renamer - 撤销重命名')
+        print('=' * 60)
+        print(f'  CSV日志:    {args.undo_csv}')
+        print(f'  记录数:     {summary["rows"]}')
+        print(f'  已恢复:     {summary["restored"]}')
+        print(f'  已跳过:     {summary["skipped"]}')
+        print(f'  错误:       {summary["errors"]}')
+        print(f'  撤销报告:   {report_path}')
+        if summary['skipped'] or summary['errors']:
+            print('  提示: 请查看撤销报告中的 undo_error 列。')
+        sys.exit(0 if summary['errors'] == 0 else 1)
 
     # ── 生成默认配置（不需要源目录） ──────────────────
     if args.generate_config:
@@ -1919,6 +2341,8 @@ def main():
             # ── 无参数时进入交互菜单（双击 exe 时） ────────────
             if not args.source:
                 opts = _interactive_menu()
+                if opts is None:
+                    break
                 args.source = opts['source']
                 args.mode = opts['mode']
                 args.recursive = opts['recursive']

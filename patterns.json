@@ -1,6 +1,6 @@
 {
   "version": "2.6",
-  "default_output_format": "%Y.%m.%d_%H%M",
+  "default_output_format": "%Y%m%d_%H%M%S",
   "_instructions_default_format": "默认输出命名格式（strftime 格式字符串）。预设名: 默认=%Y.%m.%d_%H%M, 精确到秒=%Y.%m.%d_%H%M%S, 中划线分隔=%Y-%m-%d_%H-%M-%S, 紧凑型=%Y%m%d_%H%M%S。也可使用自定义 strftime 格式（如 %Y年%m月%d日_%H%M%S）。运行时 -f 参数优先级更高。",
   "_instructions": "每个 pattern 包含: regex(正则表达式), group_count(捕获组数:3/5/6), description(描述), is_own_output(是否自有输出格式)。捕获组默认按 年、月、日、时、分、秒 顺序（YMDhms）。若文件名日期顺序不同（如 iPhone 录屏 DD-MM-YYYY），可添加 group_order 字段指定顺序（如 'DMYhms'，字符含义: Y年 M月 D日 h时 m分 s秒）。添加新模式时按优先级排列（精确的在前），保存后重新运行即可生效。",
   "patterns": [
@@ -137,6 +137,12 @@
       "description": "DD-MM-YYYY HHMMSS（iPhone录屏，如 ScreenRecording_02-06-2026 154022）",
       "is_own_output": false,
       "group_order": "DMYhms"
+    }
+  ],
+  "output_formats": [
+    {
+      "name": "自定义格式",
+      "format": "%Y%m%d_%H%M%S"
     }
   ]
 }

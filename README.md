@@ -213,7 +213,32 @@ python photo_renamer.py -s "D:\照片" -m preview
 
 > **方式 A vs B 对比**：exe 适合快速在不同电脑上使用（无需安装），但缺少 EXIF 支持。Python 方式功能更完整，推荐长期使用。
 
-### 网络盘（群晖 NAS）使用
+### 多平台构建（开发者 / CI）
+
+本项目提供 `.github/workflows/build.yml`，支持通过 **GitHub Actions** 在三个平台上自动打包：
+
+| 平台 | Runner | 产物文件名 |
+|------|--------|-----------|
+| Windows x64 | `windows-latest` | `photo-renamer-windows-x64.zip` |
+| macOS arm64 | `macos-latest` | `photo-renamer-macos-arm64.zip` |
+| Linux x64 | `ubuntu-latest` | `photo-renamer-linux-x64.tar.gz` |
+
+**触发方式**：
+- 推送 `v*` 格式标签（如 `v2.7`）→ 自动构建三平台并创建 GitHub Release
+- 在 Actions 页面手动触发（`workflow_dispatch`）
+
+**本地 Windows 手动构建**：
+
+```powershell
+pip install pyinstaller pillow piexif
+pyinstaller --onefile --name photo_renamer --add-data "patterns.json;." photo_renamer.py
+# 产物在 dist/photo_renamer.exe
+```
+
+**注意**：
+- PyInstaller **不支持交叉编译**，Windows exe 只能在 Windows 上构建，macOS/Linux 同理
+- macOS 分发如需公开发布，可能涉及代码签名（codesign）和 notarization；个人内部使用可跳过
+- TUI 版本（`--tui`）比 GUI 版本在 Linux 桌面兼容性更好，推荐跨平台场景使用 TUI
 
 本工具针对网络盘场景做了特殊适配：
 
@@ -238,6 +263,23 @@ python photo_renamer.py -s "\\NAS\照片" -m preview
 ---
 
 ## 使用方法
+
+### TUI 终端图形界面（跨平台）
+
+安装 Textual 依赖后，可启动基于终端的图形界面：
+
+```bash
+pip install "textual>=0.89,<1.0"
+python photo_renamer.py --tui
+```
+
+TUI 界面功能：
+- 左侧控制栏：源文件夹（支持拖拽路径）、包含子目录、输出格式、CSV 路径
+- 预览 / 执行重命名 / 撤销 CSV（P / E / U 快捷键）
+- **未知规则发现**：扫描未匹配文件，选中候选规则后可一键写入 `patterns.json`
+- **格式管理**：新增、保存、设为当前自定义文件名格式
+- **历史报告**：查看历次操作记录，选中行后可打开 CSV 所在目录
+- 右侧结果表格：包含状态、原文件名、新文件名、日期、规则来源、错误原因
 
 ### launch.bat / exe 交互式菜单（Windows 推荐）
 
@@ -280,6 +322,9 @@ python photo_renamer.py -s <源文件夹> [选项]
   --dedup            副本整理模式：将 (1)/(2) 副本分配到邻近空闲时间槽
   --pattern-config   自定义 patterns.json 路径（默认自动查找）
   --generate-config  在当前目录生成默认 patterns.json 后退出
+  --undo-csv         根据 CSV 日志撤销重命名操作
+  --undo-force       撤销时跳过目标冲突保护
+  --tui              启动 Textual 终端图形界面（需 pip install "textual>=0.89,<1.0"）
 ```
 
 ### 输出格式预设
@@ -615,6 +660,16 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 ---
 
 ## 版本历史
+
+### v2.7（2026-06-06）
+
+- 新增 Textual TUI 图形终端界面（`--tui`），支持预览、执行、撤销全流程操作
+- TUI 新增**未知规则逐条确认写入**：规则候选列表可选中行，点击"加入规则"按钮写入 `patterns.json`，写入后刷新候选列表防止重复添加
+- TUI 新增**格式管理面板**：支持新增自定义文件名格式、设为当前格式，并同步到主格式输入框
+- TUI 新增**历史报告增强**：增加成功数/错误数列；选中历史行后可打开 CSV 所在目录（Windows/macOS/Linux 三平台适配）
+- TUI 结果表格增加**日期**和**错误原因**两列，摘要区统一显示扫描数/成功数/冲突数/CSV 路径
+- 新增 `.github/workflows/build.yml`：GitHub Actions 多平台自动构建（Windows x64、macOS arm64、Linux x64），推送 `v*` 标签时自动生成 Release 并上传产物
+- 补充 TUI 测试用例至 13 个，覆盖规则确认写入、格式保存与设为当前、历史报告列结构、打开目录按钮等场景
 
 ### v2.6（2026-06-02）
 

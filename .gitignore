@@ -8,6 +8,7 @@ photo_renamer.pyz
 
 # IDE / Dev
 .codebuddy/
+.superpowers/
 .workbuddy/
 .vscode/
 .idea/
@@ -19,6 +20,7 @@ _test_discover/
 # Runtime output
 preview_report.csv
 rename_log.csv
+rename_history.csv
 dedup_preview.csv
 dedup_log.csv
 discover_patterns.csv
