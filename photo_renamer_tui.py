@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Textual UI for Photo & Video Renamer  v2.9
+Textual UI for Photo & Video Renamer  v2.10
 
-视觉风格：接近 Windows 经典浅色 GUI
-- 浅灰背景 + 白色面板 + 深蓝高亮
+视觉风格：深色终端 IDE 风格（参照 rich-vs-textual-cli.html 设计稿）
+- 深色背景 #111720 + 深蓝侧边栏 #141b25 + 亮蓝高亮 #7fa7ff
+- 选中行：左侧蓝条 + 深色高亮（类 VS Code）
 - Checkbox 勾选状态显示 ✓ 而非 X（重写 BUTTON_INNER）
 - 输出格式下拉，选中时右侧摘要区实时预览重命名示例
 - CSV 路径不再手动填写，默认存到目标目录；子目录各自生成独立 CSV
@@ -58,26 +59,31 @@ class Checkbox(_BaseCheckbox):
     BUTTON_INNER: str = "✓"
 
 
-# ── Windows 浅色主题颜色定义 ─────────────────────────────────────────────────
-WIN_THEME = Theme(
-    name='win-light',
-    primary='#0078d4',          # 微软蓝
-    secondary='#005a9e',
-    accent='#005a9e',
-    background='#f0f0f0',       # 经典 Win 灰背景
-    surface='#ffffff',          # 白色面板
-    panel='#f5f5f5',
-    error='#c42b1c',
-    success='#107c10',
-    warning='#d97706',
-    foreground='#1a1a1a',
-    dark=False,
+# ── 深色 IDE 主题（参照 rich-vs-textual-cli.html 设计稿） ───────────────────
+#   背景     #111720   侧边栏   #141b25   顶底栏   #0d1219
+#   高亮蓝   #7fa7ff   选中行   #1f2f45   表头     #222b37
+#   面板     #18212c   边框     #29323d   文字     #dce4ec
+#   暗文字   #8291a2   绿色     #71d69c   琥珀     #e5b15f
+#   错误红   #ee7777
+DARK_THEME = Theme(
+    name='ide-dark',
+    primary='#7fa7ff',          # 亮蓝高亮
+    secondary='#65a8f2',        # 蓝色变体
+    accent='#7fa7ff',
+    background='#111720',       # 最深背景
+    surface='#141b25',          # 工作区/侧边栏
+    panel='#18212c',            # 卡片/表头
+    error='#ee7777',
+    success='#71d69c',
+    warning='#e5b15f',
+    foreground='#dce4ec',       # 主文字
+    dark=True,
     variables={
-        'text': '#1a1a1a',
-        'text-muted': '#5c5c5c',
-        'border': '#cccccc',
-        'input-background': '#ffffff',
-        'input-foreground': '#1a1a1a',
+        'text': '#dce4ec',
+        'text-muted': '#8291a2',
+        'border': '#29323d',
+        'input-background': '#18212c',
+        'input-foreground': '#dce4ec',
         'button-color-foreground': '#ffffff',
     },
 )
@@ -130,33 +136,35 @@ def _format_example(fmt: str) -> str:
 
 
 class PhotoRenamerApp(App):
-    """Photo & Video Renamer — Windows 风格 TUI"""
+    """Photo & Video Renamer — 深色 IDE 风格 TUI"""
 
-    TITLE = 'Photo & Video Renamer  v2.9'
+    TITLE = 'Photo & Video Renamer  v2.10'
     CSS_PATH = None
 
-    # 内联 CSS：浅色 Windows 风格
+    # 内联 CSS：深色 IDE 风格（对照 rich-vs-textual-cli.html）
     CSS = """
     Screen {
-        background: $background;
-        color: $foreground;
+        background: #111720;
+        color: #dce4ec;
     }
 
     Header {
-        background: $primary;
-        color: white;
+        background: #0d1219;
+        color: #a7b4c2;
         text-style: bold;
+        border-bottom: solid #29323d;
     }
 
     Footer {
-        background: $secondary;
-        color: white;
+        background: #0d1219;
+        color: #a7b4c2;
+        border-top: solid #29323d;
     }
 
     /* ── 总体布局 ── */
     #layout {
         height: 100%;
-        padding: 0 1;
+        padding: 0;
     }
 
     /* ── 左侧边栏 ── */
@@ -165,8 +173,8 @@ class PhotoRenamerApp(App):
         min-width: 34;
         max-width: 40;
         padding: 1 1;
-        background: $panel;
-        border-right: solid $primary;
+        background: #141b25;
+        border-right: solid #29323d;
         overflow-y: auto;
         overflow-x: hidden;
     }
@@ -176,45 +184,46 @@ class PhotoRenamerApp(App):
         width: 100%;
         max-width: 36;
         margin-bottom: 1;
-        background: white;
-        border: tall $border;
-        color: $foreground;
+        background: #18212c;
+        border: tall #343f4d;
+        color: #dce4ec;
     }
 
     #sidebar Input:focus {
-        border: tall $primary;
+        border: tall #7fa7ff;
     }
 
     #sidebar Select {
         width: 100%;
         max-width: 36;
         margin-bottom: 1;
-        background: white;
-        border: tall $border;
+        background: #18212c;
+        border: tall #343f4d;
+        color: #dce4ec;
     }
 
     #sidebar Select:focus {
-        border: tall $primary;
+        border: tall #7fa7ff;
     }
 
     #sidebar Checkbox {
         width: 100%;
         max-width: 36;
         margin-bottom: 1;
-        color: $foreground;
+        color: #c9d4df;
         background: transparent;
     }
 
     /* ── 右侧工作区 ── */
     #workspace {
         padding: 1 1;
-        background: $surface;
+        background: #111720;
     }
 
     /* ── 分区标题 ── */
     .sec-title {
         text-style: bold;
-        color: $primary;
+        color: #7fa7ff;
         margin-top: 1;
         margin-bottom: 0;
         padding: 0 0;
@@ -222,7 +231,7 @@ class PhotoRenamerApp(App):
     }
 
     .sec-divider {
-        color: $primary;
+        color: #29323d;
         margin-top: 0;
         margin-bottom: 1;
         width: 100%;
@@ -251,14 +260,15 @@ class PhotoRenamerApp(App):
         width: 100%;
         max-width: 36;
         margin-bottom: 1;
-        background: $panel;
-        border: tall $border;
-        color: $foreground;
+        background: #1d2633;
+        border: tall #42516a;
+        color: #cfd9e5;
     }
 
     .tool-btn:hover {
-        background: $primary;
-        color: white;
+        background: #24304d;
+        border: tall #7fa7ff;
+        color: #ffffff;
     }
 
     /* ── 格式快捷输入行 ── */
@@ -279,43 +289,48 @@ class PhotoRenamerApp(App):
         margin-right: 0;
     }
 
-    /* ── 摘要区 ── */
+    /* ── 摘要区（深色卡片） ── */
     #summary {
         height: 8;
         padding: 1;
         margin-bottom: 1;
-        border: solid $primary;
-        background: #eaf4fb;
-        color: $foreground;
+        border: solid #42516a;
+        background: #151e29;
+        color: #c9d4df;
         overflow-y: auto;
     }
 
     /* ── 结果表格 ── */
     #results {
         height: 1fr;
-        border: solid $border;
-        background: white;
+        border: solid #33404f;
+        background: #111720;
         overflow-x: auto;
         overflow-y: auto;
     }
 
     DataTable > .datatable--cursor {
-        background: $primary 30%;
+        background: #1f2f45;
     }
 
     DataTable > .datatable--header {
-        background: $secondary;
-        color: white;
+        background: #222b37;
+        color: #b5c1cf;
         text-style: bold;
+    }
+
+    DataTable > .datatable--fixed {
+        background: #222b37;
+        color: #b5c1cf;
     }
 
     /* ── 状态栏 ── */
     #status {
         height: 2;
         padding: 0 1;
-        background: #e8e8e8;
-        color: $foreground;
-        border-top: solid $border;
+        background: #0d1219;
+        color: #a7b4c2;
+        border-top: solid #29323d;
     }
     """
 
@@ -398,8 +413,8 @@ class PhotoRenamerApp(App):
     # ────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self.register_theme(WIN_THEME)
-        self.theme = 'win-light'
+        self.register_theme(DARK_THEME)
+        self.theme = 'ide-dark'
 
     # ────────────────────────────────────────────────────────
     # 内部辅助
