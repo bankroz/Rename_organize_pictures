@@ -1625,7 +1625,7 @@ def run_rename_job(options: RenameJobOptions) -> dict:
 def launch_tui():
     """Launch the optional Textual UI."""
     try:
-        from photo_renamer_tui import PhotoRenamerTuiApp
+        from photo_renamer_tui import PhotoRenamerApp
     except ModuleNotFoundError as e:
         if e.name == 'textual':
             print('[ERROR] Textual 图形终端界面依赖未安装。')
@@ -1633,7 +1633,7 @@ def launch_tui():
             return 1
         raise
 
-    PhotoRenamerTuiApp().run()
+    PhotoRenamerApp().run()
     return 0
 
 
@@ -2306,7 +2306,14 @@ def main():
 
     args = parser.parse_args()
 
-    if args.tui:
+    # 无任何 CLI 参数（如双击 exe）时，直接启动 TUI 图形界面
+    if args.tui or (
+        not args.source
+        and not args.undo_csv
+        and not args.generate_config
+        and not args.discover
+        and not args.dedup
+    ):
         sys.exit(launch_tui())
 
     # ── 撤销重命名（不需要源目录） ─────────────────────
