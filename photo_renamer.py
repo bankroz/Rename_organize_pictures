@@ -1451,19 +1451,32 @@ def add_pattern_suggestion(signature: str, config_path: str = '') -> Optional[di
 def load_format_profiles(config_path: str = '') -> list:
     """Load built-in and custom output filename formats."""
     config = _load_config_document(config_path)
-    current = config.get('default_output_format') or FORMAT_PRESETS['默认']
-    profiles = [
-        {'name': name, 'format': fmt, 'builtin': True, 'current': fmt == current or name == current}
-        for name, fmt in FORMAT_PRESETS.items()
-    ]
+    current_name = config.get('current_output_format_name', '')
+    current_format = config.get('default_output_format') or FORMAT_PRESETS['默认']
+    profiles = []
+    selected = False
+    for name, fmt in FORMAT_PRESETS.items():
+        is_current = name == current_name if current_name else fmt == current_format
+        selected = selected or is_current
+        profiles.append({
+            'name': name,
+            'format': fmt,
+            'builtin': True,
+            'current': is_current,
+        })
     for item in config.get('output_formats', []):
         fmt = item.get('format', '')
+        name = item.get('name', fmt)
+        is_current = name == current_name if current_name else (not selected and fmt == current_format)
+        selected = selected or is_current
         profiles.append({
-            'name': item.get('name', fmt),
+            'name': name,
             'format': fmt,
             'builtin': False,
-            'current': fmt == current or item.get('name') == current,
+            'current': is_current,
         })
+    if profiles and not selected:
+        profiles[0]['current'] = True
     return profiles
 
 
@@ -1478,16 +1491,20 @@ def save_format_profile(name: str, fmt: str, config_path: str = '',
 
     config = _load_config_document(config_path)
     profiles = config.setdefault('output_formats', [])
-    existing = next((item for item in profiles if item.get('name') == name), None)
-    if existing:
-        existing['format'] = fmt
-        saved = existing
+    if name in FORMAT_PRESETS and FORMAT_PRESETS[name] == fmt:
+        saved = {'name': name, 'format': fmt, 'builtin': True}
     else:
-        saved = {'name': name, 'format': fmt}
-        profiles.append(saved)
+        existing = next((item for item in profiles if item.get('name') == name), None)
+        if existing:
+            existing['format'] = fmt
+            saved = existing
+        else:
+            saved = {'name': name, 'format': fmt}
+            profiles.append(saved)
 
     if make_current:
         config['default_output_format'] = fmt
+        config['current_output_format_name'] = name
         global _DEFAULT_OUTPUT_FORMAT
         _DEFAULT_OUTPUT_FORMAT = fmt
 

@@ -219,6 +219,40 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(custom['format'], '%Y年%m月%d日_%H%M')
             self.assertTrue(custom['current'])
 
+    def test_only_one_format_profile_is_current_when_formats_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / 'patterns.json'
+            config_path.write_text(json.dumps({
+                'patterns': [],
+                'default_output_format': '%Y%m%d_%H%M%S',
+                'current_output_format_name': '自定义格式',
+                'output_formats': [
+                    {'name': '自定义格式', 'format': '%Y%m%d_%H%M%S'},
+                ],
+            }, ensure_ascii=False), encoding='utf-8')
+
+            profiles = load_format_profiles(str(config_path))
+            current = [p for p in profiles if p['current']]
+
+            self.assertEqual(len(current), 1)
+            self.assertEqual(current[0]['name'], '自定义格式')
+
+    def test_setting_builtin_current_does_not_create_custom_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / 'patterns.json'
+            config_path.write_text(json.dumps({'patterns': [], 'output_formats': []}), encoding='utf-8')
+
+            save_format_profile('默认', '%Y.%m.%d_%H%M', str(config_path), make_current=True)
+            config = json.loads(config_path.read_text(encoding='utf-8'))
+            profiles = load_format_profiles(str(config_path))
+            current = [p for p in profiles if p['current']]
+
+            self.assertEqual(config['current_output_format_name'], '默认')
+            self.assertEqual(config['default_output_format'], '%Y.%m.%d_%H%M')
+            self.assertEqual(config['output_formats'], [])
+            self.assertEqual(len(current), 1)
+            self.assertEqual(current[0]['name'], '默认')
+
     def test_history_reports_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             history_path = Path(tmp) / 'history.csv'

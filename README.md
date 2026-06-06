@@ -1,6 +1,6 @@
-# Photo & Video Renamer v2.6
+# Photo & Video Renamer
 
-照片和视频**批量按日期重命名**工具。自动从多种来源提取拍摄时间，统一命名为 `YYYY.MM.DD_HHMM` 格式，支持 33 种媒体格式，针对网络盘（群晖 NAS 等）场景做了专项适配。
+照片和视频**批量按日期重命名**工具。自动从多种来源提取拍摄时间，统一命名为 `YYYY.MM.DD_HHMM` 格式，支持 33 种媒体格式，并提供 CSV 预览、按 CSV 撤销、未知规则发现、Textual TUI，以及针对网络盘（群晖 NAS 等）场景的超时保护。
 
 ---
 
@@ -41,24 +41,26 @@
 | **渐进式 EXIF 读取** | 只读文件头部 256 KB，无 EXIF 立即回退，避免大文件下载浪费流量 |
 | **哈希文件名防误判** | 32 字符以上的哈希类文件名自动跳过时间戳匹配 |
 | **零依赖核心** | Pillow 是唯一可选依赖，缺失时 EXIF 不可用，但文件名/时间戳功能完全正常 |
-| **绿色 exe 发布** | PyInstaller 打包的独立 exe（约 15 MB），无需安装 Python，双击即用 |
+| **绿色 exe 发布** | `win/photo_renamer.exe` 为 PyInstaller 打包的独立可执行文件，无需安装 Python |
 | **实时进度条** | 终端内联进度条，显示处理进度、耗时、超时跳过数 |
-| **核心与 CLI 分离** | `PhotoRenamer` 类可直接被 GUI 调用，不依赖 argparse |
-| **单文件架构** | 整个项目 1 个 Python 文件，复制即用 |
+| **核心与界面分离** | `photo_renamer.py` 提供 CLI 与服务层，`photo_renamer_tui.py` 提供 Textual TUI |
+| **轻量仓库结构** | 核心脚本、TUI、打包脚本、测试、配置分离，便于维护和多平台构建 |
 
 ---
 
 ## 架构流程
 
 ```
-用户双击 launch.bat / photo_renamer.exe（GBK 编码，CMD 原生稳定）
+用户可从三种入口启动：
+  1) 双击 `launch.bat`（Windows CLI 菜单）
+  2) 双击 `win/photo_renamer.exe`（Windows 绿色版，默认 CLI 菜单）
+  3) 运行 `python photo_renamer.py --tui` 或 `win/photo_renamer.exe --tui`（Textual TUI）
           │
-          ├─ 检查 Python → 安装指引
-          ├─ 选择模式（预览 / 执行 / 副本整理 / 自定义）
-          ├─ 输入或拖放文件夹路径
+          ├─ CLI 菜单：选择模式（预览 / 执行 / 副本整理 / 自定义）
+          ├─ TUI：选择文件夹 / 粘贴路径 / 预览 / 执行 / 撤销
           │
           ▼
-python photo_renamer.py -s <文件夹> -m <模式>
+photo_renamer.py 服务层 / CLI
           │
           ├─ DateExtractor     日期提取引擎（4 级优先级链）
           │    ├─ EXIF DateTimeOriginal  ← 相机写入，最准确
@@ -87,10 +89,13 @@ python photo_renamer.py -s <文件夹> -m <模式>
 | `DateExtractor` | 日期提取引擎 | 4 级优先级链，纯类方法，延迟加载模式 |
 | `PatternDiscoverer` | 智能模式发现 | 6 阶段启发式扫描，支持泛化分隔符 / 时间戳 / App 前缀 |
 | `PhotoRenamer` | 重命名引擎 | 扫描、冲突处理（分钟递增 + 级联保护）、CSV 导出 |
+| `run_rename_job()` | TUI / CLI 共用服务层 | 预览、执行、历史记录写入 |
+| `undo_from_csv()` | 撤销服务 | 根据 CSV 日志倒序恢复原文件名 |
 | `ProgressBar` | 终端进度条 | 零依赖，`\r` 原地刷新，非交互模式逐行输出 |
 | `run_with_timeout()` | 超时保护 | ThreadPoolExecutor，默认 15 s，环境变量配置 |
 | `_show_error()` | 错误弹窗 | tkinter messagebox 显示错误，终端 fallback 到 print |
-| `_offer_new_patterns()` | 智能模式追加 | 处理后扫描未匹配文件，用户确认后写入 patterns.json |
+| `_offer_new_patterns()` | 智能模式追加 | CLI 处理后扫描未匹配文件，用户确认后写入 patterns.json |
+| `PhotoRenamerApp` | Textual TUI | 格式管理、陌生规则、历史报告、撤销入口 |
 
 ---
 
@@ -147,16 +152,18 @@ python -c "from PIL import Image; print('Pillow OK')"
 
 ### 步骤 3：下载工具文件
 
-将以下 3 个文件放到同一个文件夹即可：
+最小可运行文件集如下：
 
 ```
 photo_renamer/
-├── photo_renamer.py    # 核心脚本（DateExtractor + PhotoRenamer + CLI）
-├── launch.bat          # Windows 交互式启动器（GBK 编码，中文菜单）
-├── patterns.json       # 日期模式配置文件（19 种模式，可手动编辑）
+├── photo_renamer.py       # 核心脚本（CLI + 服务层）
+├── patterns.json          # 日期模式与默认输出格式配置
+├── launch.bat             # Windows CLI 菜单入口
+├── photo_renamer_tui.py   # Textual TUI
+├── requirements-tui.txt   # TUI 依赖
 ```
 
-> `README.md` 为说明文档，`.workbuddy/` 和 `测试集/` 为本地开发数据，均不需要复制。
+> `README.md` 为说明文档；`tests/`、`.github/`、`build.bat`、`photo_renamer.spec` 用于测试和打包；`测试集.rar` 为本地测试素材，不属于运行必需文件。
 
 首次运行时，若 `patterns.json` 不存在，程序会自动生成默认配置文件。
 
@@ -193,15 +200,16 @@ win/
 └── patterns.json        # 日期模式配置文件（19 种模式，可手动编辑）
 ```
 
-将 `win/` 文件夹复制到任意位置，**双击 `photo_renamer.exe`** 即可进入交互菜单。无需安装 Python 或任何依赖。
+将 `win/` 文件夹复制到任意位置，**双击 `photo_renamer.exe`** 即可进入交互菜单。无需安装 Python。
 
-> 注意：exe 内不含 Pillow，因此**图片 EXIF 读取不可用**。文件名模式和时间戳提取功能正常。如需 EXIF 支持，请使用方式 B（Python 运行）。
+> 当前仓库内的 Windows 打包流程会把项目依赖一并打进 exe，CLI 功能与源码运行保持一致；如需 TUI，请在命令行中运行 `photo_renamer.exe --tui`。
 
 **方式 B：Python 源码运行**
 
 ```bash
-# 1. 复制项目文件（共 3 个文件）
-#    photo_renamer.py  launch.bat  patterns.json
+# 1. 复制项目文件
+#    photo_renamer.py  photo_renamer_tui.py  patterns.json  launch.bat
+#    如需 TUI，再加 requirements-tui.txt
 
 # 2. 安装依赖（推荐）
 pip install Pillow
@@ -230,9 +238,9 @@ python photo_renamer.py -s "D:\照片" -m preview
 **本地 Windows 手动构建**：
 
 ```powershell
-pip install pyinstaller pillow piexif
-pyinstaller --onefile --name photo_renamer --add-data "patterns.json;." photo_renamer.py
-# 产物在 dist/photo_renamer.exe
+pip install pyinstaller pillow piexif -r requirements-tui.txt
+py -3.10 -m PyInstaller photo_renamer.spec --clean --noconfirm
+# 产物在 dist/photo_renamer.exe，build.bat 会自动复制到 win/
 ```
 
 **注意**：
@@ -269,17 +277,19 @@ python photo_renamer.py -s "\\NAS\照片" -m preview
 安装 Textual 依赖后，可启动基于终端的图形界面：
 
 ```bash
-pip install "textual>=0.89,<1.0"
+pip install -r requirements-tui.txt
 python photo_renamer.py --tui
 ```
 
 TUI 界面功能：
-- 左侧控制栏：源文件夹（支持拖拽路径）、包含子目录、输出格式、CSV 路径
+- 左侧控制栏：源文件夹、选择文件夹、包含子目录、输出格式、陌生规则、格式管理、历史报告
 - 预览 / 执行重命名 / 撤销 CSV（P / E / U 快捷键）
 - **未知规则发现**：扫描未匹配文件，选中候选规则后可一键写入 `patterns.json`
-- **格式管理**：新增、保存、设为当前自定义文件名格式
-- **历史报告**：查看历次操作记录，选中行后可打开 CSV 所在目录
+- **格式管理**：新增、保存、设为启动默认文件名格式
+- **历史报告**：查看历次操作记录，并可按选中历史 CSV 直接撤销命名
 - 右侧结果表格：包含状态、原文件名、新文件名、日期、规则来源、错误原因
+
+> 目录输入框支持粘贴路径；“拖到输入框自动填入路径”是否可用，取决于当前终端宿主是否支持将拖放路径注入文本输入框，不建议把“整个窗口拖放”当作稳定能力。
 
 ### launch.bat / exe 交互式菜单（Windows 推荐）
 
