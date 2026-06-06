@@ -261,6 +261,8 @@ class PhotoRenamerApp(App):
         height: 1fr;
         border: solid $border;
         background: white;
+        overflow-x: auto;
+        overflow-y: auto;
     }
 
     DataTable > .datatable--cursor {
@@ -384,10 +386,47 @@ class PhotoRenamerApp(App):
     def _get_recursive(self) -> bool:
         return self.query_one('#recursive_checkbox', Checkbox).value
 
+    # 各列宽度配置（字符宽度）
+    _COL_WIDTHS = {
+        # 重命名结果列
+        '状态':   6,
+        '原文件名': 36,
+        '新文件名': 36,
+        '日期':   18,
+        '规则来源': 18,
+        '错误原因': 28,
+        # 撤销结果列
+        '目标路径': 36,
+        '已恢复为': 36,
+        '说明':   28,
+        # 规则发现列
+        '签名':   24,
+        '数量':   6,
+        '示例文本': 30,
+        '建议正则': 34,
+        '操作提示': 20,
+        # 格式管理列
+        '当前':   5,
+        '名称':   16,
+        '格式表达式': 22,
+        '类型':   6,
+        '示例':   22,
+        # 历史报告列
+        '时间':   20,
+        '模式':   10,
+        '文件夹': 30,
+        '文件数': 6,
+        '成功':   5,
+        '错误':   5,
+        'CSV 路径': 40,
+    }
+
     def _set_result_columns(self, *columns: str) -> DataTable:
         table = self.query_one('#results', DataTable)
         table.clear(columns=True)
-        table.add_columns(*columns)
+        for col in columns:
+            w = self._COL_WIDTHS.get(col)
+            table.add_column(col, width=w)
         return table
 
     def _render_rename_results(self, results: list):
