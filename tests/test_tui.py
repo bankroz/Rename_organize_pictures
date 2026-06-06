@@ -6,12 +6,12 @@ from pathlib import Path
 from textual.widgets import Checkbox, DataTable, Input, Static
 
 from photo_renamer import append_history_report
-from photo_renamer_tui import PhotoRenamerTuiApp, open_folder
+from photo_renamer_tui import PhotoRenamerApp, open_folder
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
     async def test_tui_mounts_with_recursive_enabled_by_default(self):
-        app = PhotoRenamerTuiApp()
+        app = PhotoRenamerApp()
 
         async with app.run_test() as pilot:
             recursive = app.query_one('#recursive_checkbox', Checkbox)
@@ -23,7 +23,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'IMG20240101120000.jpg').write_bytes(b'photo')
-            app = PhotoRenamerTuiApp()
+            app = PhotoRenamerApp()
 
             async with app.run_test() as pilot:
                 app.query_one('#source_input', Input).value = str(root)
@@ -41,7 +41,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'IMG20240101120000.jpg').write_bytes(b'photo')
-            app = PhotoRenamerTuiApp()
+            app = PhotoRenamerApp()
 
             async with app.run_test() as pilot:
                 app.query_one('#source_input', Input).value = str(root)
@@ -55,10 +55,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('错误原因', col_labels)
 
     async def test_format_button_loads_profiles(self):
-        app = PhotoRenamerTuiApp()
+        app = PhotoRenamerApp()
 
         async with app.run_test() as pilot:
-            app.on_formats_button()
+            app._on_formats()
             await pilot.pause()
 
             table = app.query_one('#results', DataTable)
@@ -81,29 +81,30 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             saved = next(p for p in profiles if p['name'] == '年月日')
             self.assertEqual(saved['format'], '%Y年%m月%d日_%H%M')
 
-    async def test_set_current_format_updates_format_input(self):
-        """点击设为当前格式后，主格式输入框应同步更新。"""
-        app = PhotoRenamerTuiApp()
+    async def test_set_current_format_saves(self):
+        """调用设为当前格式后，格式下拉框值应同步更新。"""
+        app = PhotoRenamerApp()
 
         async with app.run_test() as pilot:
             app.query_one('#fmt_name_input', Input).value = '自定义格式'
             app.query_one('#fmt_expr_input', Input).value = '%Y%m%d_%H%M%S'
-            app.on_set_current_button()
+            app._on_set_current()
             await pilot.pause()
 
-            fmt_val = app.query_one('#format_input', Input).value
-            self.assertEqual(fmt_val, '%Y%m%d_%H%M%S')
+            from textual.widgets import Select
+            fmt_val = app.query_one('#format_select', Select).value
+            self.assertEqual(str(fmt_val), '%Y%m%d_%H%M%S')
 
     async def test_rules_button_loads_suggestions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'Camera 2024_01_02 custom.jpg').write_bytes(b'photo')
-            app = PhotoRenamerTuiApp()
+            app = PhotoRenamerApp()
 
             async with app.run_test() as pilot:
                 app.query_one('#source_input', Input).value = str(root)
 
-                app.on_rules_button()
+                app._on_rules()
                 await pilot.pause()
 
                 table = app.query_one('#results', DataTable)
@@ -114,11 +115,11 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'Camera 2024_01_02 custom.jpg').write_bytes(b'photo')
-            app = PhotoRenamerTuiApp()
+            app = PhotoRenamerApp()
 
             async with app.run_test() as pilot:
                 app.query_one('#source_input', Input).value = str(root)
-                app.on_rules_button()
+                app._on_rules()
                 await pilot.pause()
 
                 add_btn = app.query('#add_rule_button')
@@ -133,10 +134,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             'error_count': 0,
             'csv_path': 'D:\\photos\\rename_log.csv',
         })
-        app = PhotoRenamerTuiApp()
+        app = PhotoRenamerApp()
 
         async with app.run_test() as pilot:
-            app.on_history_button()
+            app._on_history()
             await pilot.pause()
 
             table = app.query_one('#results', DataTable)
@@ -152,10 +153,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             'error_count': 1,
             'csv_path': 'D:\\photos\\rename_log.csv',
         })
-        app = PhotoRenamerTuiApp()
+        app = PhotoRenamerApp()
 
         async with app.run_test() as pilot:
-            app.on_history_button()
+            app._on_history()
             await pilot.pause()
 
             table = app.query_one('#results', DataTable)
@@ -166,10 +167,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_open_folder_button_appears_after_history_button(self):
         """历史报告加载后应动态出现打开目录按钮。"""
-        app = PhotoRenamerTuiApp()
+        app = PhotoRenamerApp()
 
         async with app.run_test() as pilot:
-            app.on_history_button()
+            app._on_history()
             await pilot.pause()
 
             open_btn = app.query('#open_folder_button')
