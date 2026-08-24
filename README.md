@@ -23,9 +23,9 @@
 
 | 特性 | 说明 |
 |------|------|
-| **4 级日期提取优先级** | EXIF → 文件名日期模式 → Unix 时间戳 → 文件修改时间，层层兜底 |
+| **4 级日期提取优先级** | 文件内部日期（图片 EXIF / 视频容器元数据）→ Unix 时间戳文件名 → 手动日期文件名 → 文件属性时间，层层兜底 |
 | **19 种文件名模式** | 覆盖全品牌安卓手机、iPhone、大疆、单反微单、微信/QQ/微博/抖音等设备和应用 |
-| **可编辑模式配置** | `patterns.json` 外部 JSON 配置，手动添加/修改日期规则，即改即生效 |
+| **可编辑模式配置** | `patterns.json` 外部 JSON 配置，手动添加/修改日期规则、默认输出格式和视频元数据短超时，即改即生效 |
 | **智能模式发现** | 处理完成后自动扫描未匹配文件，发现新命名规则并提示用户确认写入 patterns.json |
 | **错误弹窗容错** | GUI 环境下 tkinter 弹窗显示错误信息，交互模式自动回到菜单，不会闪退 |
 | **冲突智能处理** | 同名文件分钟自动 +1，含级联碰撞保护 |
@@ -38,9 +38,9 @@
 | 优势 | 说明 |
 |------|------|
 | **网络盘抗卡顿** | 全链路超时保护（EXIF 读取/stat/复制/重命名），适合群晖等 NAS 环境 |
-| **渐进式 EXIF 读取** | 只读文件头部 256 KB，无 EXIF 立即回退，避免大文件下载浪费流量 |
+| **渐进式内部元数据读取** | 图片只读头部 EXIF；视频先读容器级日期，命中即停，避免网盘大文件被完整拉取 |
 | **哈希文件名防误判** | 32 字符以上的哈希类文件名自动跳过时间戳匹配 |
-| **零依赖核心** | Pillow 是唯一可选依赖，缺失时 EXIF 不可用，但文件名/时间戳功能完全正常 |
+| **低依赖核心** | 源码运行时 Pillow 用于图片 EXIF，ffprobe 用于视频元数据；缺失时会自动回退到文件名/文件属性时间 |
 | **绿色 exe 发布** | `win/photo_renamer.exe` 为 PyInstaller 打包的独立可执行文件，无需安装 Python |
 | **实时进度条** | 终端内联进度条，显示处理进度、耗时、超时跳过数 |
 | **核心与界面分离** | `photo_renamer.py` 提供 CLI 与服务层，`photo_renamer_tui.py` 提供 Textual TUI |
@@ -63,10 +63,10 @@
 photo_renamer.py 服务层 / CLI
           │
           ├─ DateExtractor     日期提取引擎（4 级优先级链）
-          │    ├─ EXIF DateTimeOriginal  ← 相机写入，最准确
-          │    ├─ 文件名日期（19 种模式）← patterns.json 配置
-          │    ├─ Unix 时间戳（10位/13位 + App 前缀）
-          │    └─ 文件修改时间           ← 最终兜底
+          │    ├─ 文件内部日期           ← 图片 EXIF / 视频容器元数据，最高优先级
+          │    ├─ Unix 时间戳文件名      ← 10位/13位 + App 前缀，不易手动篡改
+          │    ├─ 手动日期文件名         ← patterns.json 中的 19 种明文日期模式
+          │    └─ 文件属性时间           ← Windows/macOS 创建时间；Linux 无创建时间时回退修改时间
           │
           ├─ PatternDiscoverer  智能模式发现（--discover / 交互模式自动触发）
           │    6 阶段启发式扫描 → 生成建议 JSON 条目 → 用户确认 → 写入 patterns.json
@@ -86,7 +86,7 @@ photo_renamer.py 服务层 / CLI
 
 | 类 / 函数 | 职责 | 关键特性 |
 |-----------|------|---------|
-| `DateExtractor` | 日期提取引擎 | 4 级优先级链，纯类方法，延迟加载模式 |
+| `DateExtractor` | 日期提取引擎 | 4 级优先级链，内部元数据优先，纯类方法，延迟加载模式 |
 | `PatternDiscoverer` | 智能模式发现 | 6 阶段启发式扫描，支持泛化分隔符 / 时间戳 / App 前缀 |
 | `PhotoRenamer` | 重命名引擎 | 扫描、冲突处理（分钟递增 + 级联保护）、CSV 导出 |
 | `run_rename_job()` | TUI / CLI 共用服务层 | 预览、执行、历史记录写入 |
@@ -111,7 +111,7 @@ photo_renamer.py 服务层 / CLI
 | Pillow | 图片 EXIF 读取 | 强烈推荐 | `pip install Pillow` |
 | pillow-heif | iPhone HEIC 照片解码 | 可选 | `pip install pillow-heif` |
 
-> 除上述之外，**零额外依赖**——所有功能（文件名解析、时间戳识别、进度条、CSV 导出、网络超时保护）均使用 Python 标准库实现。
+> 文件名解析、Unix 时间戳识别、进度条、CSV 导出、撤销和网络超时保护均使用 Python 标准库实现；图片 EXIF 和视频容器元数据分别依赖 Pillow 与 ffprobe。
 
 ### 步骤 1：安装 Python
 
@@ -136,9 +136,9 @@ python --version
 
 > **版本说明**：Python 3.8 是理论最低版本（代码使用了 `typing.Optional`、`typing.Tuple` 等，3.8 以上均可运行）。实际测试在 3.10 / 3.12 / 3.13 上进行，推荐使用这些版本。
 
-### 步骤 2：安装 Pillow（强烈推荐）
+### 步骤 2：安装 Pillow / ffprobe（推荐）
 
-Pillow 用于读取照片的 EXIF 拍摄时间，是唯一需要额外安装的第三方包。**缺失时程序仍可运行，但所有图片的 EXIF 信息会被跳过**，日期提取将回退到文件名模式或修改时间。
+Pillow 用于读取照片的 EXIF 拍摄时间。**缺失时程序仍可运行，但所有图片的 EXIF 信息会被跳过**，日期提取将回退到 Unix 文件名、普通日期文件名或文件属性时间。
 
 ```cmd
 pip install Pillow
@@ -150,6 +150,12 @@ pip install Pillow
 python -c "from PIL import Image; print('Pillow OK')"
 ```
 
+ffprobe 用于读取 `.mp4`、`.mov`、`.3gp` 等视频容器中的媒体创建时间。源码运行时建议安装 FFmpeg 并确保 `ffprobe` 在 PATH 中；Windows 绿色版会把 `ffprobe.exe` 打进 exe，无需用户额外安装。
+
+```cmd
+ffprobe -version
+```
+
 ### 步骤 3：下载工具文件
 
 最小可运行文件集如下：
@@ -157,7 +163,7 @@ python -c "from PIL import Image; print('Pillow OK')"
 ```
 photo_renamer/
 ├── photo_renamer.py       # 核心脚本（CLI + 服务层）
-├── patterns.json          # 日期模式与默认输出格式配置
+├── patterns.json          # 日期模式、默认输出格式、视频元数据短超时配置
 ├── launch.bat             # Windows CLI 菜单入口
 ├── photo_renamer_tui.py   # Textual TUI
 ├── requirements-tui.txt   # TUI 依赖
@@ -188,6 +194,7 @@ pip install pillow-heif
 | Windows / macOS / Linux | 全平台支持（launch.bat 仅限 Windows） | ✅ |
 | Python 3.8+ | https://python.org/downloads/ | ✅ |
 | Pillow | `pip install Pillow`，用于 EXIF 读取 | 推荐 |
+| ffprobe | 安装 FFmpeg 后提供，用于视频容器元数据日期读取 | 推荐 |
 | pillow-heif | `pip install pillow-heif`，用于 iPhone HEIC | 可选 |
 
 ### 一键部署
@@ -196,13 +203,13 @@ pip install pillow-heif
 
 ```
 win/
-├── photo_renamer.exe    # 独立可执行文件（约 15 MB，已内含 Python）
-└── patterns.json        # 日期模式配置文件（19 种模式，可手动编辑）
+├── photo_renamer.exe    # 独立可执行文件（约 60 MB，已内含 Python 与 ffprobe）
+└── patterns.json        # 日期模式、默认输出格式、视频元数据短超时配置
 ```
 
 将 `win/` 文件夹复制到任意位置，**双击 `photo_renamer.exe`** 即可进入交互菜单。无需安装 Python。
 
-> 当前仓库内的 Windows 打包流程会把项目依赖一并打进 exe，CLI 功能与源码运行保持一致；如需 TUI，请在命令行中运行 `photo_renamer.exe --tui`。
+> 当前仓库内的 Windows 打包流程会把项目依赖和 `ffprobe.exe` 一并打进 exe，视频元数据读取能力可随绿色版迁移；如需 TUI，请在命令行中运行 `photo_renamer.exe --tui`。
 
 **方式 B：Python 源码运行**
 
@@ -213,13 +220,14 @@ win/
 
 # 2. 安装依赖（推荐）
 pip install Pillow
+# 如需视频容器元数据日期，另需安装 FFmpeg 并确认 ffprobe 可用
 
 # 3a. 双击 launch.bat（Windows 推荐，交互式菜单）
 # 3b. 或命令行运行
 python photo_renamer.py -s "D:\照片" -m preview
 ```
 
-> **方式 A vs B 对比**：exe 适合快速在不同电脑上使用（无需安装），但缺少 EXIF 支持。Python 方式功能更完整，推荐长期使用。
+> **方式 A vs B 对比**：exe 适合快速在不同电脑上使用（无需安装），配置随 `patterns.json` 迁移。Python 方式适合开发和调试，需自行安装 Pillow / FFmpeg。
 
 ### 多平台构建（开发者 / CI）
 
@@ -251,7 +259,8 @@ py -3.10 -m PyInstaller photo_renamer.spec --clean --noconfirm
 本工具针对网络盘场景做了特殊适配：
 
 - **I/O 超时保护**：所有文件操作（EXIF 读取、stat、复制、重命名）均带超时，默认 15 秒
-- **渐进式 EXIF**：只读取文件头部 256 KB，避免大文件下载浪费流量
+- **渐进式内部元数据**：图片只读取头部 EXIF；视频先读容器级日期，命中即停
+- **视频元数据短超时**：`patterns.json` 的 `video_metadata_timeout_seconds` 控制视频元数据读取等待时间，运行中修改后下一次预览/执行生效
 - **超时计数**：进度条显示 `⏱超时:N`，可了解有多少文件因网络延迟被跳过
 
 **自定义超时时长**：
@@ -377,7 +386,7 @@ python photo_renamer.py -s "D:\已整理" -m execute --force
 - **预览模式**：显示警告 ⚠，但仍正常运行（方便检查结果）
 - **执行模式**：自动中止 ⛔，要求使用 `--force` 确认后才能继续
 
-这是为了防止视频文件因缺少 EXIF、回退到文件名解析时时分信息丢失（如 `2025.06.30_1402.mp4` 被错误重命名为 `2025.06.30_0000.mp4`）。
+这是为了防止已重命名文件再次被普通文件名日期规则解析，导致原始时分秒信息被覆盖或漂移。
 
 ```bash
 # 场景：目录已处理过，需要重新整理
@@ -387,11 +396,14 @@ python photo_renamer.py -s "D:\已整理" -m execute --force  # 确认无误后�
 
 ### 模式配置文件（patterns.json）
 
-v2.0 起，日期识别模式改为外部 JSON 配置，支持手动编辑：
+v2.0 起，日期识别模式改为外部 JSON 配置，支持手动编辑。当前配置文件还保存默认输出格式和视频元数据短超时，适合随绿色版一起迁移：
 
 ```json
 {
-  "version": "2.6",
+  "version": "2.8",
+  "default_output_format": "%Y.%m.%d_%H%M",
+  "current_output_format_name": "默认",
+  "video_metadata_timeout_seconds": 3,
   "patterns": [
     {
       "id": 16,
@@ -412,6 +424,9 @@ v2.0 起，日期识别模式改为外部 JSON 配置，支持手动编辑：
 | `group_count` | 3 = 仅日期；5 = 日期+时分；6 = 日期+时分秒 |
 | `is_own_output` | `true` 表示该格式用于"已重命名"检测（精确锚定匹配） |
 | `group_order` | 可选，捕获组语义顺序：`Y`年 `M`月 `D`日 `h`时 `m`分 `s`秒，默认 `YMDhms` |
+| `default_output_format` | 默认输出文件名格式，strftime 语法 |
+| `current_output_format_name` | 当前选中的输出格式名称，TUI 启动时会记忆 |
+| `video_metadata_timeout_seconds` | 视频容器元数据读取短超时，单位秒；JSON 最高优先级，运行中修改后下一次预览/执行生效 |
 
 添加新模式时，按优先级排列（精确的在前），保存后重新运行即可生效。
 
@@ -463,14 +478,14 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 
 | 优先级 | 来源 | 说明 |
 |--------|------|------|
-| 1 | EXIF DateTimeOriginal | 相机/手机写入的原始拍摄时间，最准确；仅图片文件读取，视频跳过 |
-| 2 | 文件名日期模式 | 自动识别 19 种预设模式（见下表），按优先级顺序逐个匹配 |
-| 3 | Unix 时间戳 | 文件名中的 13 位毫秒或 10 位秒级时间戳，年份限定在 2000-2099 |
-| 4 | 文件修改时间 | 以上全部失败时的兜底方案 |
+| 1 | 文件内部日期 | 图片读取 EXIF DateTimeOriginal / DateTimeDigitized / DateTime；视频读取容器元数据 `com.apple.quicktime.creationdate`、`creation_time` 等。内部日期最高优先级，命中即停 |
+| 2 | Unix 时间戳文件名 | 文件名中的 13 位毫秒或 10 位秒级时间戳，含 App 前缀嵌入规则。Unix 编码不易手动篡改，优先于普通明文日期文件名 |
+| 3 | 手动/设备明文日期文件名 | 自动识别 19 种预设模式（见下表），按 JSON 顺序逐个匹配 |
+| 4 | 文件属性时间 | 以上全部失败时的兜底。Windows/macOS 优先创建时间；Linux 无可靠创建时间时回退修改时间 |
 
-> **视频文件**不通过 Pillow 读取元数据，日期完全依赖文件名模式、Unix 时间戳和修改时间，因此即使视频文件体积很大也不会消耗下载流量。
+> **网络盘短读原则**：图片只读取头部 EXIF，视频先读取容器级标签；一旦发现可用日期立即停止，不继续深入读取流信息或完整文件。视频元数据读取等待时间由 `patterns.json` 的 `video_metadata_timeout_seconds` 控制。
 
-### 文件名日期模式（优先级 2）
+### 文件名日期模式（优先级 3）
 
 按精度从高到低排列，先匹配到的直接使用：
 
@@ -496,7 +511,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 
 > **date-only 模式**（ID 13、14、16）：仅提取到日期时，时分默认设为 `0000`。
 
-### Unix 时间戳支持（优先级 3）
+### Unix 时间戳支持（优先级 2）
 
 | 类型 | 位数 | 示例文件名 |
 |------|------|-----------|
@@ -508,7 +523,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 
 ### 模式排序规则（重要：避免被低精度模式截获）
 
-模式匹配按 **JSON 数组中的出现顺序**执行。代码对每个模式用 `finditer()` 扫描文件名，**一旦找到合法日期就立即返回**，不再继续尝试后续模式。
+手动/设备明文日期模式按 **JSON 数组中的出现顺序**执行。代码对每个模式用 `finditer()` 扫描文件名，**一旦找到合法日期就立即返回**，不再继续尝试后续模式。
 
 因此：**宽泛的模式排在精确模式前面，会"截获"本应被后面精确模式匹配的文件名，导致时分信息丢失。**
 
@@ -588,7 +603,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 
 ### 设备与应用兼容性
 
-本工具通过文件名模式、Unix 时间戳和 EXIF 三条路径提取日期，兼容以下设备与应用：
+本工具通过内部元数据、Unix 时间戳文件名、手动/设备明文日期文件名和文件属性时间四条路径提取日期，兼容以下设备与应用：
 
 #### 安卓手机（全品牌通用）
 
@@ -607,11 +622,11 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 | 类型 | 命名规则 | 提取方式 |
 |------|---------|---------|
 | 相机照片 | `IMG_XXXX.HEIC`（4 位序列号，无日期） | **EXIF**（需 Pillow + pillow-heif） |
-| 相机视频 | `IMG_XXXX.MP4`（无日期） | **文件修改时间**（无 EXIF） |
+| 相机视频 | `IMG_XXXX.MP4`（无日期） | **视频容器元数据**（QuickTime/MP4 `creation_time` / `com.apple.quicktime.creationdate`） |
 | 系统截图 | `IMG_XXXX.PNG`（无日期） | **EXIF**（iOS 15+ 截图含 EXIF） |
-| 系统录屏 | `ScreenRecording_DD-MM-YYYY HHMMSS.mp4` | **文件名模式**（ID 19，`DMYhms`） |
+| 系统录屏 | `ScreenRecording_DD-MM-YYYY HHMMSS.mp4` | 优先视频容器元数据；无元数据时使用文件名模式（ID 19，`DMYhms`） |
 
-> iPhone 原生相机照片/视频文件名不含日期信息，依赖 EXIF 或文件修改时间。建议安装 Pillow + pillow-heif 以获得最佳效果。
+> iPhone 原生相机照片/视频文件名不含日期信息，照片依赖 EXIF，视频依赖 QuickTime/MP4 容器元数据。绿色版已内置 ffprobe；源码运行需确保 ffprobe 可用。
 
 #### 三星手机
 
@@ -626,19 +641,19 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 | 类型 | 命名规则 | 提取方式 |
 |------|---------|---------|
 | 新款（Action 3/4/5、Pocket 3 等） | `DJI_YYYYMMDDHHMMSS_XXXX_D` | 文件名模式（14 位紧凑时间戳） |
-| 老款（Action 2、Pocket 2 等） | `DJI_XXXX`（纯序列号） | **EXIF** / 文件修改时间 |
+| 老款（Action 2、Pocket 2 等） | `DJI_XXXX`（纯序列号） | 图片 EXIF / 视频容器元数据；无内部日期时回退文件属性时间 |
 
 #### 单反 / 微单相机
 
 | 品牌 | 命名规则 | 提取方式 |
 |------|---------|---------|
-| 佳能 EOS/R | `IMG_XXXX.CR3`、`MVI_XXXX.MOV` | **EXIF** |
+| 佳能 EOS/R | `IMG_XXXX.CR3`、`MVI_XXXX.MOV` | 图片 EXIF / 视频容器元数据 |
 | 尼康 D/Z | `DSC_XXXX.NEF` | **EXIF** |
 | 索尼 A/RX | `DSCXXXX.ARW` | **EXIF** |
 | 富士 X/GFX | `DSCF_XXXX.RAF` | **EXIF** |
 | 松下 GH/S | `PXXXXXXX.RW2` | **EXIF** |
 
-> 单反/微单文件名均为序列号，不含日期。工具通过 EXIF 提取拍摄时间，需安装 Pillow。
+> 单反/微单文件名多为序列号，不含日期。照片通过 EXIF 提取拍摄时间；视频优先读取容器元数据。
 
 #### 社交软件保存资源
 
@@ -651,7 +666,7 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 | 抖音 | `douyin_YYYYMMDD_HHMMSS` | `抖音_YYYYMMDD_HHMMSS` | 文件名模式 |
 | 小红书 | `Camera_XHS_` + 13 位时间戳（嵌入长数字串） | — | Unix 时间戳（ms，App 前缀） |
 
-> QQ 截图保存为 `Screenshot_随机字符.png`，不含日期信息，需依赖文件修改时间。
+> QQ 截图保存为 `Screenshot_随机字符.png` 且无内部日期时，才会依赖文件属性时间兜底。
 
 ---
 
@@ -659,17 +674,26 @@ python photo_renamer.py --discover -s "D:\照片" -r --csv discover.csv
 
 - **预览优先**：建议始终先跑 `preview` 模式，确认结果无误后再执行 `execute`
 - **扩展名统一小写**：所有输出文件扩展名强制转为小写（如 `.JPG` → `.jpg`）
-- **视频 EXIF**：视频文件不通过 Pillow 读取元数据，日期完全依赖文件名模式或修改时间
+- **视频元数据**：视频不通过 Pillow 读取 EXIF，而是通过 ffprobe 短读容器标签；无视频元数据时才回退到 Unix 文件名、普通文件名和文件属性时间
 - **年份范围**：有效性检查限定 1970–2099，超出范围的数字串不会被识别为日期
 - **bat 编码**：`launch.bat` 为 GBK 编码，在非中文 Windows 系统上菜单可能乱码，但不影响功能，可改用 CLI 命令
 - **重复处理**：对已重命名的目录重新执行需加 `--force`，防止视频时分信息被错误覆盖
 - **Pillow 降级**：未安装 Pillow 时，图片 EXIF 不可用，但文件名 / 时间戳提取功能完全正常
 - **HEIC 支持**：需要额外安装 `pillow-heif`，见"环境依赖与安装"章节
-- **exe 绿色版**：`win/photo_renamer.exe` 内不含 Pillow，图片 EXIF 不可用；文件名模式和时间戳提取功能正常
+- **exe 绿色版**：`win/photo_renamer.exe` 内置 ffprobe，视频元数据可用；`patterns.json` 应和 exe 放在同一目录一起迁移
 
 ---
 
 ## 版本历史
+
+### v2.8（2026-08-24）
+
+- 修正日期提取优先级：文件内部日期（图片 EXIF / 视频容器元数据）最高；Unix 时间戳文件名优先于普通手动日期文件名；文件属性时间只做最终兜底
+- 新增视频容器元数据读取：支持 MOV/MP4/3GP 等容器中的 `com.apple.quicktime.creationdate`、`creation_time`、`creationdate`、`date`
+- 视频元数据读取采用短读策略：先读容器级标签，命中即停；无容器日期时才读流级 `creation_time`
+- 新增 `patterns.json` 顶层配置 `video_metadata_timeout_seconds`，JSON 为最高优先级，运行中修改后下一次预览/执行生效
+- Windows 绿色版打包时内置 `ffprobe.exe`，视频元数据识别能力可随 `win/` 目录迁移
+- 文件属性兜底调整：Windows/macOS 优先创建时间；Linux 无可靠创建时间时回退修改时间
 
 ### v2.7（2026-06-06）
 

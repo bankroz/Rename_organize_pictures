@@ -1,14 +1,18 @@
 import csv
+import os
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import json
 
 from photo_renamer import (
+    DateExtractor,
     PhotoRenamer,
     RenameJobOptions,
     append_history_report,
@@ -20,6 +24,8 @@ from photo_renamer import (
     resolve_format,
     run_rename_job,
     run_with_timeout,
+    set_pattern_config_path,
+    get_video_metadata_timeout,
     undo_from_csv,
 )
 
@@ -206,6 +212,171 @@ class SafetyTests(unittest.TestCase):
             self.assertTrue(suggestions)
             self.assertIn('signature', suggestions[0])
             self.assertIn('suggestion', suggestions[0])
+
+    def test_discover_rule_suggestions_skips_supported_unix_timestamp_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '1728267073523_100_edit_798591120684390.jpg').write_bytes(b'photo')
+
+            suggestions = discover_rule_suggestions(str(root))
+
+            self.assertEqual(suggestions, [])
+
+    def test_prefixed_unix_timestamp_name_uses_explicit_rule(self):
+        dt, source = DateExtractor.extract(Path('1728267073523_100_edit_798591120684390.jpg'))
+        self.assertIsNotNone(dt)
+        self.assertEqual(source, 'UnixTimestamp(ms,编辑导出)')
+
+    def test_unix_timestamp_filename_wins_over_manual_date_filename(self):
+        dt, source = DateExtractor.extract(Path('20240615_1728267073523.jpg'))
+
+        self.assertEqual(dt, datetime.fromtimestamp(1728267073523 / 1000.0))
+        self.assertEqual(source, 'UnixTimestamp(ms)')
+
+    def test_file_property_time_is_last_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'no_date_marker.bin'
+            path.write_bytes(b'data')
+
+            dt, source = DateExtractor.extract(path)
+
+        self.assertIsNotNone(dt)
+        self.assertIn(source, {'FileCreateTime', 'FileModifyTime'})
+
+    def test_video_metadata_prefers_quicktime_creationdate(self):
+        probe = {
+            'format': {
+                'tags': {
+                    'creation_time': '2017-03-04T10:50:17.000000Z',
+                    'com.apple.quicktime.creationdate': '2017-03-04T18:50:16+0800',
+                },
+            },
+            'streams': [
+                {'tags': {'creation_time': '2017-03-04T10:50:17.000000Z'}},
+            ],
+        }
+
+        dt, source = DateExtractor._from_video_metadata_probe(probe)
+
+        self.assertEqual(dt, datetime(2017, 3, 4, 18, 50, 16))
+        self.assertEqual(source, 'VideoMetadata(com.apple.quicktime.creationdate)')
+
+    def test_mov_extract_uses_video_metadata_before_file_time(self):
+        probe = {
+            'format': {
+                'tags': {
+                    'com.apple.quicktime.creationdate': '2017-03-04T18:50:16+0800',
+                },
+            },
+            'streams': [],
+        }
+
+        with patch.object(DateExtractor, '_run_ffprobe_json', return_value=(probe, '')):
+            dt, source = DateExtractor.extract(Path('IMG_3383.MOV'))
+
+        self.assertEqual(dt, datetime(2017, 3, 4, 18, 50, 16))
+        self.assertEqual(source, 'VideoMetadata(com.apple.quicktime.creationdate)')
+
+    def test_video_metadata_wins_over_filename_date(self):
+        probe = {
+            'format': {
+                'tags': {
+                    'creation_time': '2016-10-18T10:07:47.000000Z',
+                },
+            },
+            'streams': [],
+        }
+
+        with patch.object(DateExtractor, '_run_ffprobe_json', return_value=(probe, '')):
+            dt, source = DateExtractor.extract(Path('20161116.MP4'))
+
+        self.assertEqual(dt, datetime(2016, 10, 18, 18, 7, 47))
+        self.assertEqual(source, 'VideoMetadata(creation_time)')
+
+    def test_video_falls_back_to_filename_when_metadata_missing(self):
+        with patch.object(DateExtractor, '_run_ffprobe_json', return_value=({}, '')):
+            dt, source = DateExtractor.extract(Path('20161116.MP4'))
+
+        self.assertEqual(dt, datetime(2016, 11, 16, 0, 0, 0))
+        self.assertTrue(source.startswith('Filename('))
+
+    def test_video_metadata_accepts_creationdate_and_date_fields(self):
+        probe = {
+            'format': {
+                'tags': {
+                    'creationdate': '2017-03-04T18:50:16+0800',
+                },
+            },
+        }
+
+        dt, source = DateExtractor._from_video_metadata_probe(probe)
+
+        self.assertEqual(dt, datetime(2017, 3, 4, 18, 50, 16))
+        self.assertEqual(source, 'VideoMetadata(creationdate)')
+
+        dt, source = DateExtractor._from_video_metadata_probe({
+            'format': {'tags': {'date': '2017-03-04'}},
+        })
+        self.assertEqual(dt, datetime(2017, 3, 4, 0, 0, 0))
+        self.assertEqual(source, 'VideoMetadata(date)')
+
+    def test_video_metadata_stops_after_format_level_match(self):
+        calls = []
+
+        def fake_probe(_path, entries, sections):
+            calls.append((entries, tuple(sections)))
+            return ({
+                'format': {
+                    'tags': {
+                        'creation_time': '2017-03-04T10:50:17.000000Z',
+                    },
+                },
+            }, '')
+
+        with patch.object(DateExtractor, '_run_ffprobe_json', side_effect=fake_probe):
+            dt, source = DateExtractor._from_video_metadata(Path('clip.mp4'))
+
+        self.assertIsNotNone(dt)
+        self.assertEqual(source, 'VideoMetadata(creation_time)')
+        self.assertEqual(len(calls), 1)
+        self.assertIn('-show_format', calls[0][1])
+
+    def test_video_timeout_uses_patterns_json_above_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / 'patterns.json'
+            config_path.write_text(json.dumps({
+                'video_metadata_timeout_seconds': 4,
+            }), encoding='utf-8')
+
+            original_config = os.environ.get('PHOTO_RENAMER_VIDEO_TIMEOUT')
+            os.environ['PHOTO_RENAMER_VIDEO_TIMEOUT'] = '9'
+            set_pattern_config_path(str(config_path))
+            try:
+                self.assertEqual(get_video_metadata_timeout(), 4)
+            finally:
+                if original_config is None:
+                    os.environ.pop('PHOTO_RENAMER_VIDEO_TIMEOUT', None)
+                else:
+                    os.environ['PHOTO_RENAMER_VIDEO_TIMEOUT'] = original_config
+                set_pattern_config_path('')
+
+    def test_video_timeout_reflects_patterns_json_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / 'patterns.json'
+            config_path.write_text(json.dumps({
+                'video_metadata_timeout_seconds': 2,
+            }), encoding='utf-8')
+            set_pattern_config_path(str(config_path))
+            try:
+                self.assertEqual(get_video_metadata_timeout(), 2)
+
+                config_path.write_text(json.dumps({
+                    'video_metadata_timeout_seconds': 5,
+                }), encoding='utf-8')
+
+                self.assertEqual(get_video_metadata_timeout(), 5)
+            finally:
+                set_pattern_config_path('')
 
     def test_save_and_load_format_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:

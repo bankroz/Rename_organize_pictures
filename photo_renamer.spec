@@ -7,16 +7,19 @@ PyInstaller spec — 将 photo_renamer.py（含 TUI）打包为单个 exe
 Textual 组件（含 CSS / WIDGET 静态资源）通过 collect_data_files 自动收集。
 """
 import sys
+import shutil
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # 收集 Textual 和 rich 的静态资源（CSS / tcss / widget templates 等）
 textual_datas   = collect_data_files('textual')
 rich_datas      = collect_data_files('rich')
+ffprobe_path    = shutil.which('ffprobe')
+ffprobe_bins    = [(ffprobe_path, '.')] if ffprobe_path else []
 
 a = Analysis(
     ['photo_renamer.py'],
     pathex=[],
-    binaries=[],
+    binaries=ffprobe_bins,
     datas=textual_datas + rich_datas,   # patterns.json 保持外部可编辑，不打包
     hiddenimports=[
         # 图片 EXIF 支持

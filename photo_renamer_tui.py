@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Textual UI for Photo & Video Renamer.
@@ -8,6 +8,7 @@ management are delegated to the service layer in photo_renamer.py.
 """
 
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -18,7 +19,9 @@ from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.theme import Theme
+from textual.worker import Worker, WorkerState
 from textual.widgets import (
     Button,
     DataTable,
@@ -26,6 +29,7 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    ProgressBar,
     Select,
     Static,
 )
@@ -71,7 +75,7 @@ def open_folder(path: str) -> str:
     try:
         target = Path(path)
         if not target.exists():
-            return f"路径不存在：{path}"
+            return f"璺緞涓嶅瓨鍦細{path}"
         folder = target if target.is_dir() else target.parent
         if sys.platform == "win32":
             os.startfile(str(folder))
@@ -81,7 +85,7 @@ def open_folder(path: str) -> str:
             subprocess.run(["xdg-open", str(folder)], check=True)
         return ""
     except Exception as exc:
-        return f"打开文件夹失败：{exc}"
+        return f"鎵撳紑鏂囦欢澶瑰け璐ワ細{exc}"
 
 
 def choose_directory(initial_dir: str = "") -> str:
@@ -91,7 +95,7 @@ def choose_directory(initial_dir: str = "") -> str:
     root.attributes("-topmost", True)
     try:
         selected = filedialog.askdirectory(
-            title="选择源文件夹",
+            title="閫夋嫨婧愭枃浠跺す",
             initialdir=initial_dir or str(Path.home()),
             mustexist=True,
         )
@@ -109,7 +113,7 @@ def _build_format_options() -> tuple[list[tuple[str, str]], str]:
     options: list[tuple[str, str]] = []
     current_value = ""
     for profile in profiles:
-        prefix = "默认  " if profile.get("current") else "      "
+        prefix = "榛樿  " if profile.get("current") else "      "
         label = f"{prefix}{profile.get('name', '')} | {profile.get('format', '')}"
         fmt = profile.get("format", "")
         if fmt:
@@ -118,7 +122,7 @@ def _build_format_options() -> tuple[list[tuple[str, str]], str]:
             current_value = fmt
 
     if not options:
-        options = [("默认  默认 | %Y.%m.%d_%H%M", "%Y.%m.%d_%H%M")]
+        options = [("榛樿  榛樿 | %Y.%m.%d_%H%M", "%Y.%m.%d_%H%M")]
         current_value = "%Y.%m.%d_%H%M"
     return options, current_value or options[0][1]
 
@@ -127,7 +131,7 @@ def _format_example(fmt: str) -> str:
     try:
         return datetime(2024, 6, 15, 14, 30, 0).strftime(fmt)
     except Exception:
-        return "格式无效"
+        return "鏍煎紡鏃犳晥"
 
 
 class PhotoRenamerApp(App):
@@ -305,15 +309,31 @@ class PhotoRenamerApp(App):
         background: #243a5a;
     }
 
-    #status {
-        height: 3;
-        padding: 1 2;
+    #progress_panel {
+        height: 4;
+        padding: 0 1;
         margin-top: 1;
         background: #0a0f15;
+        border: solid #0ea5a5;
+    }
+
+    #status {
+        height: 1;
+        padding: 0 1;
         color: #a9b8c7;
-        border: solid #263241;
+        background: transparent;
+        border: none;
+    }
+
+    #progress_bar {
+        width: 100%;
+        height: 1;
+        margin-top: 1;
+        margin-bottom: 0;
     }
     """
+
+    SOURCE_PATH_SETTLE_SECONDS = 0.8
 
     BINDINGS = [
         ("p", "preview", "预览"),
@@ -360,6 +380,8 @@ class PhotoRenamerApp(App):
         self._source_input_revision = 0
         self._suppress_source_change = False
         self._ui_mode = "idle"
+        self._job_worker: Worker | None = None
+        self._job_mode = ""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -403,13 +425,15 @@ class PhotoRenamerApp(App):
                     "准备就绪\n"
                     "1. 选择源文件夹和文件名格式。\n"
                     "2. 点击左侧上方的预览或执行重命名。\n"
-                    "3. 执行后可撤销最近一次，或从历史记录选择旧 CSV 撤销。",
+                    "3. 执行后可撤销最近一次，或从历史记录选择 CSV 撤销。",
                     id="summary",
                 )
                 table = DataTable(id="results", cursor_type="row")
                 table.add_columns("状态", "原文件名", "新文件名", "日期", "规则来源", "错误原因")
                 yield table
-                yield Static("快捷键：P 预览 | E 执行 | U 撤销最近一次 | Q 退出", id="status")
+                with Vertical(id="progress_panel"):
+                    yield Static("快捷键：P 预览 | E 执行 | U 撤销最近一次 | Q 退出", id="status")
+                    yield ProgressBar(total=100, show_percentage=False, show_eta=False, id="progress_bar")
 
         yield Footer()
 
@@ -420,13 +444,55 @@ class PhotoRenamerApp(App):
         self.query_one("#source_input", Input).focus()
 
     def _status(self, message: str) -> None:
-        self.query_one("#status", Static).update(message)
+        try:
+            self.query_one("#status", Static).update(message)
+        except NoMatches:
+            return
+
+    def _set_progress(self, progress: float = 0, total: float = 100) -> None:
+        try:
+            self.query_one("#progress_bar", ProgressBar).update(total=total, progress=progress)
+        except NoMatches:
+            return
+
+    def _reset_progress(self, label: str) -> None:
+        self._set_progress(0, 100)
+        self._status(f"{label}中，正在准备...")
+
+    def _apply_progress(self, payload: dict) -> None:
+        stage_labels = {
+            "preview": "预览分析",
+            "analyze": "扫描文件",
+            "execute": "执行重命名",
+        }
+        stage = stage_labels.get(str(payload.get("stage", "")), str(payload.get("stage", "")) or "处理中")
+        current = int(payload.get("current", 0) or 0)
+        total = int(payload.get("total", 0) or 0)
+        percent = float(payload.get("percent", 0) or 0)
+        info = str(payload.get("info", "") or "").strip()
+
+        if total > 0:
+            self._set_progress(min(current, total), total)
+            status = f"{stage}: {current}/{total}  {percent:.0f}%"
+        else:
+            self._set_progress(0, 100)
+            status = f"{stage}: {percent:.0f}%"
+        if info:
+            status = f"{status} | {info}"
+        self._status(status)
+    
 
     def _summary(self, message: str) -> None:
-        self.query_one("#summary", Static).update(message)
+        try:
+            self.query_one("#summary", Static).update(message)
+        except NoMatches:
+            return
 
     def _refocus_source_input(self) -> None:
-        self.query_one("#source_input", Input).focus()
+        try:
+            self.query_one("#source_input", Input).focus()
+        except NoMatches:
+            return
 
     def _summary_with_csv(self, lines: list[str], csv_path: str = "", history_path: str = "") -> None:
         text = Text("\n".join(lines))
@@ -443,7 +509,10 @@ class PhotoRenamerApp(App):
                 text.append(uri, style=f"underline #8be9fd link {uri}")
         if history_path:
             text.append(f"\n历史记录：{history_path}")
-        self.query_one("#summary", Static).update(text)
+        try:
+            self.query_one("#summary", Static).update(text)
+        except NoMatches:
+            return
 
     def _get_source(self) -> str:
         return self.query_one("#source_input", Input).value.strip().strip('"').strip("'")
@@ -452,7 +521,10 @@ class PhotoRenamerApp(App):
         return self._recursive
 
     def _get_format(self) -> str:
-        value = self.query_one("#format_select", Select).value
+        try:
+            value = self.query_one("#format_select", Select).value
+        except NoMatches:
+            return ""
         return str(value) if value else ""
 
     def _normalize_pasted_path(self, text: str) -> str:
@@ -476,7 +548,7 @@ class PhotoRenamerApp(App):
 
     def _update_recursive_toggle(self) -> None:
         button = self.query_one("#recursive_toggle", Button)
-        button.label = "✓ 已包含子目录" if self._recursive else "□ 不包含子目录"
+        button.label = "√ 已包含子目录" if self._recursive else "○ 不包含子目录"
         if self._recursive:
             button.add_class("toggle-on")
             button.remove_class("toggle-off")
@@ -496,8 +568,16 @@ class PhotoRenamerApp(App):
                 return path.parent
         return None
 
+    def _pick_embedded_external_target(self, text: str) -> Path | None:
+        candidates = [text]
+        # Some terminals insert a dropped path at the cursor. If an old path is
+        # already present, the value can become "old_pathD:\new_path".
+        for match in re.finditer(r'(?i)[A-Z]:[\\/]', text):
+            candidates.append(text[match.start():])
+        return self._pick_external_target(reversed(candidates))
+
     def _accept_external_path(self, text: str) -> bool:
-        target = self._pick_external_target([text])
+        target = self._pick_embedded_external_target(text)
         if target is None:
             return False
         self._apply_source_path(target)
@@ -510,14 +590,17 @@ class PhotoRenamerApp(App):
         def resolve_later() -> None:
             if revision != self._source_input_revision or self._ui_mode != "idle":
                 return
-            current_value = self._normalize_pasted_path(self._get_source())
+            try:
+                current_value = self._normalize_pasted_path(self._get_source())
+            except NoMatches:
+                return
             if current_value != candidate or not current_value:
                 return
-            target = self._pick_external_target([current_value])
+            target = self._pick_embedded_external_target(current_value)
             if target is not None:
                 self._apply_source_path(target)
 
-        self.set_timer(0.3, resolve_later)
+        self.set_timer(self.SOURCE_PATH_SETTLE_SECONDS, resolve_later)
 
     def _set_result_columns(self, *columns: str) -> DataTable:
         table = self.query_one("#results", DataTable)
@@ -527,7 +610,10 @@ class PhotoRenamerApp(App):
         return table
 
     def _render_rename_results(self, results: list[dict]) -> None:
-        table = self._set_result_columns("状态", "原文件名", "新文件名", "日期", "规则来源", "错误原因")
+        try:
+            table = self._set_result_columns("状态", "原文件名", "新文件名", "日期", "规则来源", "错误原因")
+        except NoMatches:
+            return
         for row in results[:2000]:
             table.add_row(
                 str(row.get("status", "")),
@@ -538,15 +624,15 @@ class PhotoRenamerApp(App):
                 str(row.get("error", "") or ""),
             )
 
-    def _make_options(self, mode: str) -> RenameJobOptions:
+    def _make_options(self, mode: str, progress_callback=None) -> RenameJobOptions:
         return RenameJobOptions(
             source_dir=self._get_source(),
             mode=mode,
             recursive=self._get_recursive(),
             fmt_arg=self._get_format(),
             csv_path="",
+            progress_callback=progress_callback,
         )
-
     def _render_undo_details(self, summary: dict, report_path: str) -> None:
         self._summary(
             "撤销完成\n"
@@ -554,7 +640,10 @@ class PhotoRenamerApp(App):
             f"恢复：{summary.get('restored', 0)}    跳过：{summary.get('skipped', 0)}    错误：{summary.get('errors', 0)}\n"
             f"撤销报告：{report_path}"
         )
-        table = self._set_result_columns("状态", "目标路径", "恢复到", "说明")
+        try:
+            table = self._set_result_columns("状态", "目标路径", "恢复到", "说明")
+        except NoMatches:
+            return
         for row in summary.get("details", [])[:2000]:
             table.add_row(
                 str(row.get("status", "")),
@@ -605,23 +694,17 @@ class PhotoRenamerApp(App):
             return
         self._schedule_source_path_resolution(candidate)
 
-    def _run_job(self, mode: str) -> None:
-        source = self._get_source()
-        if not source:
-            self._status("请先填写源文件夹路径。")
-            self._refocus_source_input()
-            return
+    def _run_job_in_thread(self, mode: str) -> dict:
+        def progress_callback(payload: dict) -> None:
+            try:
+                self.call_from_thread(self._apply_progress, dict(payload))
+            except Exception:
+                return
 
+        return run_rename_job(self._make_options(mode, progress_callback=progress_callback))
+
+    def _complete_job(self, mode: str, summary: dict) -> None:
         label = "预览" if mode == "preview" else "执行"
-        self._ui_mode = "rename"
-        self._status(f"{label}中，请稍候...")
-        try:
-            summary = run_rename_job(self._make_options(mode))
-        except Exception as exc:
-            self._status(f"{label}失败：{exc}")
-            self._refocus_source_input()
-            return
-
         csv_path = summary.get("csv_path", "")
         history_path = summary.get("history_path", "")
         if csv_path:
@@ -638,11 +721,61 @@ class PhotoRenamerApp(App):
             history_path=history_path or "-",
         )
         self._render_rename_results(summary.get("results", []))
+        self._set_progress(100, 100)
         self._status(f"{label}完成。可用“撤销最近一次”或历史区“撤销命名”。")
+        self._ui_mode = "idle"
+        self._job_worker = None
+        self._job_mode = ""
         self._refocus_source_input()
 
-    def action_preview(self) -> None:
-        self._run_job("preview")
+    @on(Worker.StateChanged)
+    def _on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker is not self._job_worker:
+            return
+        if event.state == WorkerState.SUCCESS:
+            self._complete_job(self._job_mode, event.worker.result or {})
+        elif event.state == WorkerState.ERROR:
+            label = "预览" if self._job_mode == "preview" else "执行"
+            self._set_progress(0, 100)
+            self._status(f"{label}失败：{event.worker.error}")
+            self._ui_mode = "idle"
+            self._job_worker = None
+            self._job_mode = ""
+            self._refocus_source_input()
+        elif event.state == WorkerState.CANCELLED:
+            self._set_progress(0, 100)
+            self._status("任务已取消。")
+            self._ui_mode = "idle"
+            self._job_worker = None
+            self._job_mode = ""
+            self._refocus_source_input()
+
+    def _run_job(self, mode: str) -> None:
+        source = self._get_source()
+        if not source:
+            self._status("请先填写源文件夹路径。")
+            self._refocus_source_input()
+            return
+
+        if self._ui_mode == "rename":
+            self._status("当前已有任务在运行。")
+            return
+
+        label = "预览" if mode == "preview" else "执行"
+        self._ui_mode = "rename"
+        self._job_mode = mode
+        self._reset_progress(label)
+        self._job_worker = self.run_worker(
+            lambda: self._run_job_in_thread(mode),
+            name=f"{mode}-job",
+            group="rename-job",
+            description=f"{label}任务",
+            exit_on_error=False,
+            exclusive=True,
+            thread=True,
+        )
+
+    def action_preview(self) -> None:        self._run_job("preview")
 
     def action_execute(self) -> None:
         self._run_job("execute")
@@ -709,7 +842,7 @@ class PhotoRenamerApp(App):
         table = self._set_result_columns("匹配数", "示例文件名", "建议正则", "规则签名")
         for item in suggestions[:200]:
             examples = item.get("examples") or []
-            example = examples[0].get("match_text", "") if examples else ""
+            example = Path(examples[0].get("file", "")).name if examples else ""
             regex = (item.get("suggestion") or {}).get("regex", "")
             table.add_row(str(item.get("count", 0)), example, regex, item.get("signature", ""))
 
@@ -808,7 +941,10 @@ class PhotoRenamerApp(App):
         if self._ui_mode == "rules" and idx < len(self._rule_suggestions):
             item = self._rule_suggestions[idx]
             examples = item.get("examples") or []
-            example_text = "\n".join(f"- {entry.get('match_text', '')}" for entry in examples[:4])
+            example_text = "\n".join(
+                f"- {Path(entry.get('file', '')).name}  (匹配片段: {entry.get('match_text', '')})"
+                for entry in examples[:4]
+            )
             regex = (item.get("suggestion") or {}).get("regex", "无建议")
             self._summary(
                 "候选规则详情\n"
@@ -816,7 +952,7 @@ class PhotoRenamerApp(App):
                 f"匹配文件：{item.get('count', 0)} 个\n"
                 f"建议正则：{regex}\n"
                 f"示例文件名：\n{example_text}\n"
-                "确认这些示例属于同一种命名规则后，再点击“加入选中规则”。"
+                "确认这些示例属于同一类命名规则后，再点击“加入选中规则”。"
             )
 
     @on(Button.Pressed, "#save_format_button")
@@ -859,7 +995,6 @@ class PhotoRenamerApp(App):
             select.value = current
         except Exception:
             pass
-
     @on(Button.Pressed, "#history_button")
     def _on_history(self) -> None:
         self._ui_mode = "history"
@@ -886,7 +1021,7 @@ class PhotoRenamerApp(App):
             "历史报告\n"
             f"记录数量：{len(rows)}\n"
             "选中一行后点击“撤销命名”，会按该次操作生成的 CSV 直接执行撤销。\n"
-            "这一步会真正改回文件名。"
+            "这一步会真实改回文件名。"
         )
         self._status("历史报告已加载。选中一条记录后可执行“撤销命名”。")
 
@@ -913,10 +1048,16 @@ class PhotoRenamerApp(App):
         self._last_csv_path = csv_path
         self._undo_from_csv_path(csv_path)
 
-
 def main() -> None:
     PhotoRenamerApp().run()
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+

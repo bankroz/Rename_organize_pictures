@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Photo & Video Renamer v2.6
-按日期重命名照片和视频，优先级：EXIF → 文件名日期 → Unix时间戳 → 文件修改时间
+Photo & Video Renamer v2.8
+按日期重命名照片和视频，优先级：内部日期 → Unix时间戳文件名 → 手动日期文件名 → 文件属性时间
 
 用法:
   python photo_renamer.py --source "D:\图片" --mode preview
@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # 全局超时配置（秒），可根据网络环境调整
 NETWORK_TIMEOUT = float(os.environ.get('PHOTO_RENAMER_TIMEOUT', '15'))
+DEFAULT_VIDEO_METADATA_TIMEOUT = min(3.0, NETWORK_TIMEOUT)
 
 INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 WINDOWS_RESERVED_NAMES = {
@@ -96,22 +98,43 @@ class ProgressBar:
     """终端内联进度条，支持 \r 原地刷新"""
 
     def __init__(self, total: int, desc: str = '处理中', width: int = 30,
-                 disable: bool = False):
+                 disable: bool = False, callback=None, stage: str = ''):
         self.total = max(total, 1)
         self.desc = desc
         self.width = width
         self.disable = disable or not sys.stdout.isatty()
+        self.callback = callback
+        self.stage = stage or desc
         self.current = 0
         self._last_len = 0
         self._start_time = time.time()
         self.timeouts = 0  # 超时跳过计数
 
+    def _emit(self, done: bool = False, info: str = ''):
+        if not self.callback:
+            return
+        elapsed = time.time() - self._start_time
+        self.callback({
+            'stage': self.stage,
+            'desc': self.desc,
+            'current': self.current,
+            'total': self.total,
+            'percent': min(100, int(self.current * 100 / self.total)),
+            'elapsed': elapsed,
+            'timeouts': self.timeouts,
+            'info': info,
+            'done': done,
+        })
+
     def update(self, n: int = 1, info: str = ''):
         """增加进度并刷新显示"""
         self.current += n
+        self._emit(done=False, info=info)
         elapsed = time.time() - self._start_time
         elapsed_str = f'{int(elapsed // 60)}m{int(elapsed % 60)}s'
         if self.disable:
+            if self.callback:
+                return
             # 非交互终端：每 20% 打印一行
             if self.current == 1 or self.current >= self.total or self.current % max(1, self.total // 5) == 0:
                 pct = self.current * 100 // self.total
@@ -140,8 +163,11 @@ class ProgressBar:
 
     def close(self):
         """完成时换行"""
+        self._emit(done=True)
         elapsed = time.time() - self._start_time
         elapsed_str = f'{int(elapsed // 60)}m{int(elapsed % 60)}s'
+        if self.disable and self.callback:
+            return
         if not self.disable:
             _safe_stdout_write('\n')
             sys.stdout.flush()
@@ -221,6 +247,16 @@ _PATTERN_CONFIG_PATH: Optional[str] = None
 _DEFAULT_OUTPUT_FORMAT: Optional[str] = None
 
 
+def _coerce_timeout_seconds(value: Any, default: float) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return default
+    if timeout <= 0:
+        return default
+    return min(timeout, NETWORK_TIMEOUT)
+
+
 def set_pattern_config_path(path: str):
     """设置自定义 patterns.json 路径"""
     global _PATTERN_CONFIG_PATH
@@ -242,6 +278,24 @@ def _find_config_path() -> Path:
     if cwd.exists():
         return cwd
     return _get_exe_dir() / 'patterns.json'
+
+
+def get_video_metadata_timeout() -> float:
+    """视频元数据短读超时：patterns.json 最高优先级，运行中修改后下次读取生效。"""
+    config_path = _find_config_path()
+    if config_path.exists():
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            configured = config.get('video_metadata_timeout_seconds')
+            if configured is not None:
+                return _coerce_timeout_seconds(configured, DEFAULT_VIDEO_METADATA_TIMEOUT)
+        except Exception:
+            pass
+    env_value = os.environ.get('PHOTO_RENAMER_VIDEO_TIMEOUT')
+    if env_value:
+        return _coerce_timeout_seconds(env_value, DEFAULT_VIDEO_METADATA_TIMEOUT)
+    return DEFAULT_VIDEO_METADATA_TIMEOUT
 
 
 def _from_default_patterns() -> list:
@@ -299,8 +353,14 @@ def generate_default_config(json_path: Path = None):
     if json_path is None:
         json_path = _find_config_path()
     config = {
-        "version": "2.5",
+        "version": "2.8",
         "default_output_format": "%Y.%m.%d_%H%M",
+        "video_metadata_timeout_seconds": DEFAULT_VIDEO_METADATA_TIMEOUT,
+        "_instructions_video_metadata_timeout": (
+            "视频元数据读取短超时，单位秒。用于 MOV/MP4/3GP 等容器日期探测；"
+            "数值越大越可能读到网盘慢文件，但预览/重命名等待更久。"
+            "程序运行中修改此值，下一次预览或执行会直接生效。"
+        ),
         "_instructions": (
             "每个 pattern 包含: regex(正则表达式), group_count(捕获组数:3/5/6), "
             "description(描述), is_own_output(是否自有输出格式)。"
@@ -321,7 +381,7 @@ def generate_default_config(json_path: Path = None):
 # ╚══════════════════════════════════════════════════════════╝
 
 class DateExtractor:
-    """按优先级链提取日期：EXIF → 文件名 → Unix时间戳 → 修改时间"""
+    """按优先级链提取日期：内部日期 → Unix时间戳文件名 → 手动日期文件名 → 文件属性时间"""
 
     _patterns: list = []          # [(compiled_regex, entry_dict), ...]
     _renamed_patterns: list = []  # [compiled_regex, ...]
@@ -376,6 +436,7 @@ class DateExtractor:
     # 这些模式下 13 位毫秒时间戳右侧不一定有 \D 边界
     PREFIXED_MS_PATTERNS: list = [
         (re.compile(r'Camera_XHS_(\d{13})'), '小红书相机'),     # Camera_XHS_1779195734185...
+        (re.compile(r'^(\d{13})_\d+_edit_'), '编辑导出'),      # 1728267073523_100_edit_...
     ]
 
     # 哈希文件名检测阈值
@@ -389,30 +450,38 @@ class DateExtractor:
     def extract(cls, filepath: Path) -> Tuple[Optional[datetime], str]:
         """
         返回 (datetime对象, 来源描述)
-        来源描述: 'EXIF', 'Filename(模式名)', 'UnixTimestamp(ms)', 'FileModifyTime'
+        来源描述: 'EXIF', 'VideoMetadata(字段名)', 'UnixTimestamp(ms)', 'Filename(模式名)', 'FileCreateTime'
         若所有方法均失败且有超时发生，来源标注 '(timeout)'
         """
         had_timeout = False
+        is_video = filepath.suffix.lower() in VIDEO_EXTS
 
-        # 优先级1: EXIF
+        # 优先级1: 文件内部日期。图片读 EXIF，视频读容器元数据；命中即停。
         dt, source = cls._from_exif(filepath)
         if 'timeout' in source:
             had_timeout = True
         if dt:
             return dt, source
 
-        # 优先级2: 文件名日期
-        dt, source = cls._from_filename(filepath)
-        if dt:
-            return dt, source
+        if is_video:
+            dt, source = cls._from_video_metadata(filepath)
+            if 'timeout' in source:
+                had_timeout = True
+            if dt:
+                return dt, source
 
-        # 优先级3: Unix 时间戳
+        # 优先级2: Unix 时间戳文件名。比手动标注文件名更不容易被随手篡改。
         dt, source = cls._from_timestamp(filepath)
         if dt:
             return dt, source
 
-        # 优先级4: 文件修改时间
-        dt, source = cls._from_modify_time(filepath)
+        # 优先级3: 手动/设备明文日期文件名。
+        dt, source = cls._from_filename(filepath)
+        if dt:
+            return dt, source
+
+        # 优先级4: 文件属性时间。Windows/macOS 优先创建时间，Linux 无创建时间时回退修改时间。
+        dt, source = cls._from_file_property_time(filepath)
         if 'timeout' in source:
             had_timeout = True
         if dt:
@@ -639,16 +708,160 @@ class DateExtractor:
         return None, ''
 
     @classmethod
-    def _from_modify_time(cls, filepath: Path) -> Tuple[Optional[datetime], str]:
+    def _find_ffprobe(cls) -> Optional[str]:
+        exe_name = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
+        bundle_dir = getattr(sys, '_MEIPASS', '')
+        if bundle_dir:
+            bundled = Path(bundle_dir) / exe_name
+            if bundled.exists():
+                return str(bundled)
+        return shutil.which('ffprobe')
+
+    @classmethod
+    def _run_ffprobe_json(cls, filepath: Path, entries: str, sections: List[str]) -> Tuple[Optional[dict], str]:
+        ffprobe = cls._find_ffprobe()
+        if not ffprobe:
+            return None, ''
+
+        cmd = [
+            ffprobe,
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_entries', entries,
+        ]
+        cmd.extend(sections)
+        cmd.append(str(filepath))
         try:
-            mtime = run_with_timeout(lambda p: p.stat().st_mtime, filepath,
-                                     timeout=NETWORK_TIMEOUT, default=None)
-            if mtime is None:
-                return None, 'FileModifyTime(timeout)'
-            dt = datetime.fromtimestamp(mtime)
-            return dt, 'FileModifyTime'
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=get_video_metadata_timeout(),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return None, 'VideoMetadata(timeout)'
         except Exception:
             return None, ''
+
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return None, ''
+        try:
+            return json.loads(completed.stdout), ''
+        except json.JSONDecodeError:
+            return None, ''
+
+    @staticmethod
+    def _parse_video_datetime(value: str, keep_offset_wall_time: bool = False) -> Optional[datetime]:
+        if not value:
+            return None
+        text = str(value).strip()
+        text = re.sub(r'Z$', '+00:00', text)
+        text = re.sub(r'([+-]\d{2})(\d{2})$', r'\1:\2', text)
+
+        parsed = None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            for fmt in (
+                '%Y:%m:%d %H:%M:%S',
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%d',
+                '%Y:%m:%d',
+                '%Y.%m.%d',
+            ):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+        if parsed is None:
+            return None
+
+        if parsed.tzinfo is None:
+            return parsed
+        if keep_offset_wall_time:
+            return parsed.replace(tzinfo=None)
+        return parsed.astimezone().replace(tzinfo=None)
+
+    @classmethod
+    def _from_video_metadata_probe(cls, probe: dict) -> Tuple[Optional[datetime], str]:
+        format_tags = (probe.get('format') or {}).get('tags') or {}
+        quicktime_date = format_tags.get('com.apple.quicktime.creationdate')
+        dt = cls._parse_video_datetime(quicktime_date, keep_offset_wall_time=True)
+        if dt:
+            return dt, 'VideoMetadata(com.apple.quicktime.creationdate)'
+
+        format_creation = format_tags.get('creation_time')
+        dt = cls._parse_video_datetime(format_creation)
+        if dt:
+            return dt, 'VideoMetadata(creation_time)'
+
+        for field in ('creationdate', 'date'):
+            dt = cls._parse_video_datetime(format_tags.get(field), keep_offset_wall_time=True)
+            if dt:
+                return dt, f'VideoMetadata({field})'
+
+        for stream in probe.get('streams') or []:
+            stream_tags = (stream or {}).get('tags') or {}
+            dt = cls._parse_video_datetime(stream_tags.get('creation_time'))
+            if dt:
+                return dt, 'VideoMetadata(stream.creation_time)'
+
+        return None, ''
+
+    @classmethod
+    def _from_video_metadata(cls, filepath: Path) -> Tuple[Optional[datetime], str]:
+        ext = filepath.suffix.lower()
+        if ext not in VIDEO_EXTS:
+            return None, ''
+
+        # 先只读容器级标签。很多 MOV/MP4/iPhone 视频的日期在这里，
+        # 命中后立刻返回，避免网盘文件被不必要地深入分析。
+        probe, source = cls._run_ffprobe_json(
+            filepath,
+            'format_tags=creation_time,com.apple.quicktime.creationdate,creationdate,date',
+            ['-show_format'],
+        )
+        if source:
+            return None, source
+        if probe:
+            dt, meta_source = cls._from_video_metadata_probe(probe)
+            if dt:
+                return dt, meta_source
+
+        # 容器级没有日期时，再读流级 creation_time 作为补充。
+        probe, source = cls._run_ffprobe_json(
+            filepath,
+            'stream_tags=creation_time',
+            ['-show_streams'],
+        )
+        if source:
+            return None, source
+        if not probe:
+            return None, ''
+        return cls._from_video_metadata_probe(probe)
+
+    @classmethod
+    def _from_file_property_time(cls, filepath: Path) -> Tuple[Optional[datetime], str]:
+        try:
+            stat_result = run_with_timeout(lambda p: p.stat(), filepath,
+                                           timeout=NETWORK_TIMEOUT, default=None)
+            if stat_result is None:
+                return None, 'FileCreateTime(timeout)'
+            if hasattr(stat_result, 'st_birthtime'):
+                return datetime.fromtimestamp(stat_result.st_birthtime), 'FileCreateTime'
+            if sys.platform == 'win32':
+                return datetime.fromtimestamp(stat_result.st_ctime), 'FileCreateTime'
+            return datetime.fromtimestamp(stat_result.st_mtime), 'FileModifyTime'
+        except Exception:
+            return None, ''
+
+    @classmethod
+    def _from_modify_time(cls, filepath: Path) -> Tuple[Optional[datetime], str]:
+        return cls._from_file_property_time(filepath)
 
 
 # ╔══════════════════════════════════════════════════════════╗
@@ -709,6 +922,7 @@ class PatternDiscoverer:
     # App 前缀嵌入时间戳（时间戳后紧跟更多数字/哈希）
     _PREFIXED_TS_PATTERNS = [
         (re.compile(r'Camera_XHS_(\d{13})'), 'UnixTimestamp(ms,小红书)'),
+        (re.compile(r'^(\d{13})_\d+_edit_'), 'UnixTimestamp(ms,编辑导出)'),
     ]
 
     @classmethod
@@ -728,9 +942,12 @@ class PatternDiscoverer:
         discoveries: Dict[str, list] = {}
 
         for fp in filepaths:
-            # 跳过已被现有模式匹配的文件
+            # 跳过已被现有规则识别的文件：文件名规则或 Unix 时间戳规则
             if existing_extractor:
                 dt, _ = existing_extractor._from_filename(fp)
+                if dt:
+                    continue
+                dt, _ = existing_extractor._from_timestamp(fp)
                 if dt:
                     continue
 
@@ -1240,15 +1457,26 @@ class PhotoRenamer:
         progress.close()
         return self.results
 
-    def execute(self) -> int:
+    def execute(self, progress_callback: Optional[Callable[[dict], None]] = None) -> int:
         """真正执行重命名/复制，返回成功数"""
         # 第一阶段：计算所有目标路径
-        progress = ProgressBar(len(self.scan_files()), desc='分析文件')
+        progress = ProgressBar(
+            len(self.scan_files()),
+            desc='分析文件',
+            callback=progress_callback,
+            stage='analyze',
+        )
         results = self.process(mode='execute', progress=progress)
         # process() 已经 close 了 progress，但我们还需要第二阶段进度
 
         # 第二阶段：执行重命名/复制
-        exec_pb = ProgressBar(len(results), desc='执行重命名', disable=progress.disable)
+        exec_pb = ProgressBar(
+            len(results),
+            desc='执行重命名',
+            disable=progress.disable,
+            callback=progress_callback,
+            stage='execute',
+        )
         success = 0
 
         for r in results:
@@ -1557,6 +1785,7 @@ class RenameJobOptions:
     csv_path: str = ''
     ext_arg: str = ''
     pattern_config: str = ''
+    progress_callback: Optional[Callable[[dict], None]] = None
 
 
 def _parse_exts(ext_arg: str) -> Optional[set]:
@@ -1607,12 +1836,19 @@ def run_rename_job(options: RenameJobOptions) -> dict:
 
     files = renamer.scan_files()
     if options.mode == 'preview':
-        results = renamer.process(mode='preview')
+        preview_progress = ProgressBar(
+            len(files),
+            desc='预览分析',
+            disable=True,
+            callback=options.progress_callback,
+            stage='preview',
+        )
+        results = renamer.process(mode='preview', progress=preview_progress)
         csv_path = options.csv_path or str(source_dir / 'preview_report.csv')
         renamer.write_csv(csv_path)
         ok_count = sum(1 for r in results if r.get('status') == 'ok')
     else:
-        ok_count = renamer.execute()
+        ok_count = renamer.execute(progress_callback=options.progress_callback)
         results = renamer.results
         csv_path = options.csv_path or str(source_dir / 'rename_log.csv')
         renamer.write_csv(csv_path)
@@ -2179,7 +2415,7 @@ def _interactive_menu():
     while True:
         print()
         print('=' * 58)
-        print('   Photo & Video Renamer v2.6')
+        print('   Photo & Video Renamer v2.8')
         print('=' * 58)
         print()
         print('   [1] 预览 - 单个文件夹')
@@ -2421,7 +2657,7 @@ def main():
 
             # 打印摘要
             print('=' * 60)
-            print('  Photo & Video Renamer v2.6')
+            print('  Photo & Video Renamer v2.8')
             print('=' * 60)
             print(f'  源文件夹:   {source_dir}')
             print(f'  模式:       {"🔍 预览（不修改文件）" if args.mode == "preview" else "⚡ 执行重命名"}')
@@ -2430,6 +2666,7 @@ def main():
             print(f'  输出方式:   {"复制到: " + output_dir if output_dir else "原地重命名"}')
             print(f'  扩展名:     {", ".join(sorted(exts)) if exts else "全部支持格式"}')
             print(f'  I/O 超时:   {NETWORK_TIMEOUT}s（可通过环境变量 PHOTO_RENAMER_TIMEOUT 调整）')
+            print(f'  视频元数据: {get_video_metadata_timeout()}s（patterns.json: video_metadata_timeout_seconds）')
             print('=' * 60)
 
             # 创建 renamer 实例

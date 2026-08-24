@@ -1,8 +1,9 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from textual.widgets import DataTable, Input, Select, Static
+from textual.widgets import DataTable, Input, ProgressBar, Select, Static
 
 from photo_renamer import append_history_report
 from photo_renamer_tui import PhotoRenamerApp, choose_directory, open_folder
@@ -66,10 +67,53 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test() as pilot:
                 source_input = app.query_one("#source_input", Input)
                 source_input.value = str(root)
-                await pilot.pause(0.4)
+                await pilot.pause(app.SOURCE_PATH_SETTLE_SECONDS + 0.2)
 
                 summary = str(app.query_one("#summary", Static).renderable)
                 self.assertIn(str(root), summary)
+
+    async def test_source_input_replaces_existing_path_when_drop_text_is_appended(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_dir = root / "old"
+            new_dir = root / "new"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            app = PhotoRenamerApp()
+
+            async with app.run_test() as pilot:
+                source_input = app.query_one("#source_input", Input)
+                source_input.value = str(old_dir)
+                await pilot.pause(app.SOURCE_PATH_SETTLE_SECONDS + 0.2)
+
+                source_input.value = f"{old_dir}{new_dir}"
+                await pilot.pause(app.SOURCE_PATH_SETTLE_SECONDS + 0.2)
+
+                self.assertEqual(source_input.value, str(new_dir))
+
+    async def test_source_input_waits_for_full_dropped_path_before_replacing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_dir = root / "old"
+            parent_dir = root / "new"
+            final_dir = parent_dir / "deep"
+            old_dir.mkdir()
+            final_dir.mkdir(parents=True)
+            app = PhotoRenamerApp()
+
+            async with app.run_test() as pilot:
+                source_input = app.query_one("#source_input", Input)
+                source_input.value = str(old_dir)
+                await pilot.pause(app.SOURCE_PATH_SETTLE_SECONDS + 0.2)
+
+                source_input.value = f"{old_dir}{parent_dir}"
+                await pilot.pause(0.2)
+                self.assertNotEqual(source_input.value, str(parent_dir))
+
+                source_input.value = f"{old_dir}{final_dir}"
+                await pilot.pause(app.SOURCE_PATH_SETTLE_SECONDS + 0.2)
+
+                self.assertEqual(source_input.value, str(final_dir))
 
     async def test_browse_button_uses_selected_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,6 +163,109 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("日期", labels)
                 self.assertIn("规则来源", labels)
                 self.assertIn("错误原因", labels)
+
+    async def test_preview_shows_live_progress_while_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "IMG20240101120000.jpg").write_bytes(b"photo")
+            app = PhotoRenamerApp()
+            import photo_renamer_tui
+
+            original = photo_renamer_tui.run_rename_job
+
+            def fake_run_rename_job(options):
+                callback = options.progress_callback
+                if callback:
+                    callback({
+                        "stage": "preview",
+                        "current": 1,
+                        "total": 3,
+                        "percent": 33,
+                        "info": "step1",
+                        "done": False,
+                    })
+                    time.sleep(0.2)
+                return {
+                    "mode": "preview",
+                    "source_dir": str(root),
+                    "files_count": 3,
+                    "ok_count": 3,
+                    "error_count": 0,
+                    "csv_path": str(root / "preview_report.csv"),
+                    "history_path": "",
+                    "results": [],
+                }
+
+            try:
+                photo_renamer_tui.run_rename_job = fake_run_rename_job
+                async with app.run_test() as pilot:
+                    app.query_one("#source_input", Input).value = str(root)
+                    app.action_preview()
+                    await pilot.pause(0.05)
+
+                    progress = app.query_one("#progress_bar", ProgressBar)
+                    status = str(app.query_one("#status", Static).renderable)
+                    self.assertGreater(progress.progress, 0)
+                    self.assertLess(progress.progress, 100)
+                    self.assertIn("1/3", status)
+            finally:
+                photo_renamer_tui.run_rename_job = original
+
+    async def test_execute_shows_live_progress_while_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "IMG20240101120000.jpg").write_bytes(b"photo")
+            app = PhotoRenamerApp()
+            import photo_renamer_tui
+
+            original = photo_renamer_tui.run_rename_job
+
+            def fake_run_rename_job(options):
+                callback = options.progress_callback
+                if callback:
+                    callback({
+                        "stage": "analyze",
+                        "current": 1,
+                        "total": 3,
+                        "percent": 33,
+                        "info": "scan1",
+                        "done": False,
+                    })
+                    callback({
+                        "stage": "execute",
+                        "current": 1,
+                        "total": 3,
+                        "percent": 33,
+                        "info": "rename1",
+                        "done": False,
+                    })
+                    time.sleep(0.2)
+                return {
+                    "mode": "execute",
+                    "source_dir": str(root),
+                    "files_count": 3,
+                    "ok_count": 3,
+                    "error_count": 0,
+                    "csv_path": str(root / "rename_history.csv"),
+                    "history_path": str(root / "history.csv"),
+                    "results": [],
+                }
+
+            try:
+                photo_renamer_tui.run_rename_job = fake_run_rename_job
+                async with app.run_test() as pilot:
+                    app.query_one("#source_input", Input).value = str(root)
+                    app.action_execute()
+                    await pilot.pause(0.05)
+
+                    progress = app.query_one("#progress_bar", ProgressBar)
+                    status = str(app.query_one("#status", Static).renderable)
+                    self.assertGreater(progress.progress, 0)
+                    self.assertLess(progress.progress, 100)
+                    self.assertIn("执行重命名", status)
+                    self.assertIn("1/3", status)
+            finally:
+                photo_renamer_tui.run_rename_job = original
 
     async def test_format_button_loads_profiles(self):
         app = PhotoRenamerApp()
@@ -193,6 +340,37 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 table = app.query_one("#results", DataTable)
                 labels = [str(column.label) for column in table.columns.values()]
                 self.assertEqual(labels, ["匹配数", "示例文件名", "建议正则", "规则签名"])
+
+    async def test_rule_table_shows_real_filename_not_match_fragment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            filename = "Camera 2024_01_02 custom.jpg"
+            (root / filename).write_bytes(b"photo")
+            app = PhotoRenamerApp()
+
+            async with app.run_test() as pilot:
+                app.query_one("#source_input", Input).value = str(root)
+                app._on_rules()
+                await pilot.pause()
+
+                table = app.query_one("#results", DataTable)
+                row_key = next(iter(table.rows))
+                cells = [str(cell) for cell in table.get_row(row_key)]
+                self.assertIn(filename, cells[1])
+
+    async def test_rule_scan_skips_supported_unix_timestamp_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "1728267073523_100_edit_798591120684390.jpg").write_bytes(b"photo")
+            app = PhotoRenamerApp()
+
+            async with app.run_test() as pilot:
+                app.query_one("#source_input", Input).value = str(root)
+                app._on_rules()
+                await pilot.pause()
+
+                table = app.query_one("#results", DataTable)
+                self.assertEqual(table.row_count, 0)
 
     async def test_history_button_loads_reports(self):
         append_history_report({
