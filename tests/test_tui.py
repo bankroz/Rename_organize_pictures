@@ -1,12 +1,13 @@
 import tempfile
 import time
 import unittest
+import json
 from pathlib import Path
 
 from textual.widgets import DataTable, Input, ProgressBar, Select, Static
 
-from photo_renamer import append_history_report
-from photo_renamer_tui import PhotoRenamerApp, choose_directory, open_folder
+from photo_renamer import DateExtractor, append_history_report, set_pattern_config_path
+from photo_renamer_tui import PhotoRenamerApp, _build_format_options, choose_directory, open_folder
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
@@ -41,6 +42,14 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(app.query_one("#undo_button"))
             self.assertEqual(len(app.query("#open_current_csv_button")), 0)
 
+    def test_format_options_render_current_label_without_mojibake(self):
+        options, current = _build_format_options()
+
+        self.assertTrue(current)
+        labels = [label for label, _value in options]
+        self.assertTrue(any("默认" in label for label in labels))
+        self.assertFalse(any("榛" in label or "鏍" in label for label in labels))
+
     async def test_preview_button_populates_summary_and_table(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -50,7 +59,10 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test() as pilot:
                 app.query_one("#source_input", Input).value = str(root)
                 app.action_preview()
-                await pilot.pause()
+                for _ in range(20):
+                    await pilot.pause(0.1)
+                    if app.query_one("#results", DataTable).row_count:
+                        break
 
                 renderable = app.query_one("#summary", Static).renderable
                 summary = renderable.plain if hasattr(renderable, "plain") else str(renderable)
@@ -357,6 +369,183 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 row_key = next(iter(table.rows))
                 cells = [str(cell) for cell in table.get_row(row_key)]
                 self.assertIn(filename, cells[1])
+
+    async def test_rule_scan_detects_hyphen_date_with_compact_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            filename = "2022-05-01-2201.jpg"
+            (root / filename).write_bytes(b"photo")
+            app = PhotoRenamerApp()
+
+            async with app.run_test() as pilot:
+                app.query_one("#source_input", Input).value = str(root)
+                app._on_rules()
+                await pilot.pause()
+
+                table = app.query_one("#results", DataTable)
+                self.assertEqual(table.row_count, 1)
+                row_key = next(iter(table.rows))
+                cells = [str(cell) for cell in table.get_row(row_key)]
+                self.assertIn(filename, cells[1])
+                self.assertIn("YYYY-MM-DD-HHMM", cells[3])
+
+    async def test_rule_scan_shows_existing_rule_coverage_when_not_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "patterns.json"
+            config_path.write_text(json.dumps({
+                "patterns": [
+                    {
+                        "id": 20,
+                        "regex": r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(?!\d)",
+                        "group_count": 5,
+                        "description": "YYYY-MM-DD-HHMM（用户确认添加）",
+                        "is_own_output": False,
+                    }
+                ]
+            }, ensure_ascii=False), encoding="utf-8")
+            photo_dir = root / "photos"
+            photo_dir.mkdir()
+            (photo_dir / "2022-05-01-2201.jpg").write_bytes(b"photo")
+            app = PhotoRenamerApp()
+
+            set_pattern_config_path(str(config_path))
+            DateExtractor.reload_patterns(str(config_path))
+            try:
+                async with app.run_test() as pilot:
+                    app.query_one("#source_input", Input).value = str(photo_dir)
+                    app._on_rules()
+                    await pilot.pause()
+
+                    table = app.query_one("#results", DataTable)
+                    self.assertEqual(table.row_count, 1)
+                    row_key = next(iter(table.rows))
+                    cells = [str(cell) for cell in table.get_row(row_key)]
+                    self.assertEqual(cells[0], "已覆盖")
+                    self.assertEqual(cells[3], "20")
+                    self.assertIn("YYYY-MM-DD-HHMM", cells[4])
+            finally:
+                set_pattern_config_path("")
+                DateExtractor.reload_patterns()
+
+    async def test_add_rule_button_writes_selected_signature_to_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "patterns.json"
+            config_path.write_text(json.dumps({
+                "patterns": [
+                    {
+                        "id": 14,
+                        "regex": r"(\d{4})-(\d{2})-(\d{2})",
+                        "group_count": 3,
+                        "description": "YYYY-MM-DD（纯中划线日期）",
+                        "is_own_output": False,
+                    }
+                ]
+            }, ensure_ascii=False), encoding="utf-8")
+            photo_dir = root / "photos"
+            photo_dir.mkdir()
+            (photo_dir / "2022-05-01-2201.jpg").write_bytes(b"photo")
+            app = PhotoRenamerApp()
+
+            set_pattern_config_path(str(config_path))
+            DateExtractor.reload_patterns(str(config_path))
+            try:
+                async with app.run_test() as pilot:
+                    app.query_one("#source_input", Input).value = str(photo_dir)
+                    app._on_rules()
+                    await pilot.pause()
+
+                    app._on_add_rule()
+                    await pilot.pause()
+
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                self.assertEqual(config["patterns"][0]["description"], "YYYY-MM-DD-HHMM（用户确认添加）")
+            finally:
+                set_pattern_config_path("")
+                DateExtractor.reload_patterns()
+
+    async def test_pattern_rule_list_allows_edit_and_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "patterns.json"
+            config_path.write_text(json.dumps({
+                "patterns": [
+                    {
+                        "id": 30,
+                        "regex": r"(\d{4})-(\d{2})-(\d{2})",
+                        "group_count": 3,
+                        "description": "旧识别规则",
+                        "is_own_output": False,
+                    }
+                ]
+            }, ensure_ascii=False), encoding="utf-8")
+            app = PhotoRenamerApp()
+
+            set_pattern_config_path(str(config_path))
+            DateExtractor.reload_patterns(str(config_path))
+            try:
+                async with app.run_test() as pilot:
+                    app._on_patterns()
+                    await pilot.pause()
+
+                    table = app.query_one("#results", DataTable)
+                    self.assertEqual(table.row_count, 1)
+                    row_key = next(iter(table.rows))
+                    cells = [str(cell) for cell in table.get_row(row_key)]
+                    self.assertIn("旧识别规则", cells[1])
+
+                    app.query_one("#fmt_name_input", Input).value = "新识别规则"
+                    app.query_one("#fmt_expr_input", Input).value = r"(\d{4})\.(\d{2})\.(\d{2})"
+                    app._on_save_format()
+                    await pilot.pause()
+
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    self.assertEqual(config["patterns"][0]["description"], "新识别规则")
+                    self.assertEqual(config["patterns"][0]["regex"], r"(\d{4})\.(\d{2})\.(\d{2})")
+
+                    app._on_delete_format()
+                    await pilot.pause()
+
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    self.assertEqual(config["patterns"], [])
+            finally:
+                set_pattern_config_path("")
+                DateExtractor.reload_patterns()
+
+    async def test_pattern_rule_list_row_count_matches_json_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "patterns.json"
+            config_path.write_text(json.dumps({
+                "patterns": [
+                    {
+                        "id": 10 + idx,
+                        "regex": r"(\d{4})-(\d{2})-(\d{2})",
+                        "group_count": 3,
+                        "description": f"规则{idx}",
+                        "is_own_output": False,
+                    }
+                    for idx in range(6)
+                ]
+            }, ensure_ascii=False), encoding="utf-8")
+            app = PhotoRenamerApp()
+
+            set_pattern_config_path(str(config_path))
+            DateExtractor.reload_patterns(str(config_path))
+            try:
+                async with app.run_test() as pilot:
+                    app._on_patterns()
+                    await pilot.pause()
+
+                    table = app.query_one("#results", DataTable)
+                    summary = str(app.query_one("#summary", Static).renderable)
+                    self.assertEqual(table.row_count, 6)
+                    self.assertIn("JSON 条目数：6", summary)
+                    self.assertIn("表格行数：6", summary)
+            finally:
+                set_pattern_config_path("")
+                DateExtractor.reload_patterns()
 
     async def test_rule_scan_skips_supported_unix_timestamp_filename(self):
         with tempfile.TemporaryDirectory() as tmp:

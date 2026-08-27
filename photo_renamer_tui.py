@@ -37,11 +37,16 @@ from textual.widgets import (
 from photo_renamer import (
     RenameJobOptions,
     add_pattern_suggestion,
-    discover_rule_suggestions,
+    delete_format_profile,
+    delete_pattern_rule,
+    discover_rule_report,
+    get_pattern_config_path,
     load_format_profiles,
+    load_pattern_rules,
     load_history_reports,
     run_rename_job,
     save_format_profile,
+    save_pattern_rule,
     undo_from_csv,
     write_undo_report,
 )
@@ -75,7 +80,7 @@ def open_folder(path: str) -> str:
     try:
         target = Path(path)
         if not target.exists():
-            return f"璺緞涓嶅瓨鍦細{path}"
+            return f"路径不存在：{path}"
         folder = target if target.is_dir() else target.parent
         if sys.platform == "win32":
             os.startfile(str(folder))
@@ -85,7 +90,7 @@ def open_folder(path: str) -> str:
             subprocess.run(["xdg-open", str(folder)], check=True)
         return ""
     except Exception as exc:
-        return f"鎵撳紑鏂囦欢澶瑰け璐ワ細{exc}"
+        return f"打开文件夹失败：{exc}"
 
 
 def choose_directory(initial_dir: str = "") -> str:
@@ -95,7 +100,7 @@ def choose_directory(initial_dir: str = "") -> str:
     root.attributes("-topmost", True)
     try:
         selected = filedialog.askdirectory(
-            title="閫夋嫨婧愭枃浠跺す",
+            title="选择源文件夹",
             initialdir=initial_dir or str(Path.home()),
             mustexist=True,
         )
@@ -113,7 +118,7 @@ def _build_format_options() -> tuple[list[tuple[str, str]], str]:
     options: list[tuple[str, str]] = []
     current_value = ""
     for profile in profiles:
-        prefix = "榛樿  " if profile.get("current") else "      "
+        prefix = "默认  " if profile.get("current") else "      "
         label = f"{prefix}{profile.get('name', '')} | {profile.get('format', '')}"
         fmt = profile.get("format", "")
         if fmt:
@@ -122,7 +127,7 @@ def _build_format_options() -> tuple[list[tuple[str, str]], str]:
             current_value = fmt
 
     if not options:
-        options = [("榛樿  榛樿 | %Y.%m.%d_%H%M", "%Y.%m.%d_%H%M")]
+        options = [("默认  默认 | %Y.%m.%d_%H%M", "%Y.%m.%d_%H%M")]
         current_value = "%Y.%m.%d_%H%M"
     return options, current_value or options[0][1]
 
@@ -131,7 +136,7 @@ def _format_example(fmt: str) -> str:
     try:
         return datetime(2024, 6, 15, 14, 30, 0).strftime(fmt)
     except Exception:
-        return "鏍煎紡鏃犳晥"
+        return "格式无效"
 
 
 class PhotoRenamerApp(App):
@@ -237,6 +242,17 @@ class PhotoRenamerApp(App):
     .tool-btn:hover {
         background: #24324a;
         border: tall #78aefc;
+    }
+
+    .tool-btn.danger {
+        background: #3a1d27;
+        color: #ffd7dc;
+        border: tall #7a3342;
+    }
+
+    .tool-btn.danger:hover {
+        background: #5a2635;
+        border: tall #ff7b88;
     }
 
     .primary-btn {
@@ -356,6 +372,11 @@ class PhotoRenamerApp(App):
         "示例文件名": 36,
         "建议正则": 42,
         "规则签名": 34,
+        "规则ID": 8,
+        "ID": 8,
+        "规则名称": 30,
+        "捕获组": 8,
+        "正则": 48,
         "启动默认": 10,
         "名称": 16,
         "格式表达式": 26,
@@ -373,8 +394,11 @@ class PhotoRenamerApp(App):
     def __init__(self):
         super().__init__()
         self._rule_suggestions: list[dict] = []
+        self._covered_rules: list[dict] = []
         self._format_profiles: list[dict] = []
+        self._pattern_rules: list[dict] = []
         self._history_rows: list[dict] = []
+        self._selected_format_name = ""
         self._last_csv_path = ""
         self._recursive = True
         self._source_input_revision = 0
@@ -400,20 +424,22 @@ class PhotoRenamerApp(App):
                 yield Button("撤销最近一次", id="undo_button", classes="primary-btn")
                 yield Static("高频操作放在这里。先预览，再执行。", classes="hint")
 
-                yield Label("2. 文件名格式", classes="section")
+                yield Label("2. 输出命名格式", classes="section")
                 yield Select(options=options, value=current, id="format_select", allow_blank=False)
-                yield Static("启动时默认选中的格式会写入配置并自动记忆。", classes="hint")
+                yield Static("这里只控制重命名后的显示样式，不是识别规则库。", classes="hint")
 
                 yield Label("3. 陌生规则", classes="section")
                 yield Button("扫描陌生规则", id="rules_button", classes="tool-btn")
                 yield Button("加入选中规则", id="add_rule_button", classes="tool-btn")
+                yield Button("识别规则列表（JSON）", id="patterns_button", classes="tool-btn")
 
-                yield Label("4. 格式管理", classes="section")
+                yield Label("4. 输出格式管理", classes="section")
                 with Horizontal(id="format-row"):
                     yield Input(placeholder="名称", id="fmt_name_input")
                     yield Input(placeholder="%Y.%m.%d_%H%M", id="fmt_expr_input")
-                yield Button("查看格式列表", id="formats_button", classes="tool-btn")
-                yield Button("保存格式", id="save_format_button", classes="tool-btn")
+                yield Button("输出格式列表", id="formats_button", classes="tool-btn")
+                yield Button("保存当前项", id="save_format_button", classes="tool-btn")
+                yield Button("删除选中项", id="delete_format_button", classes="tool-btn danger")
                 yield Button("设为启动默认", id="set_current_button", classes="tool-btn")
 
                 yield Label("5. 历史", classes="section")
@@ -423,9 +449,10 @@ class PhotoRenamerApp(App):
             with Vertical(id="workspace"):
                 yield Static(
                     "准备就绪\n"
-                    "1. 选择源文件夹和文件名格式。\n"
+                    "1. 选择源文件夹和输出命名格式。\n"
                     "2. 点击左侧上方的预览或执行重命名。\n"
-                    "3. 执行后可撤销最近一次，或从历史记录选择 CSV 撤销。",
+                    "3. JSON 里的日期识别规则在“识别规则列表（JSON）”中查看和编辑。\n"
+                    "4. 执行后可撤销最近一次，或从历史记录选择 CSV 撤销。",
                     id="summary",
                 )
                 table = DataTable(id="results", cursor_type="row")
@@ -833,27 +860,42 @@ class PhotoRenamerApp(App):
         self._ui_mode = "rules"
         self._status("正在扫描陌生规则...")
         try:
-            suggestions = discover_rule_suggestions(source, recursive=self._get_recursive())
+            report = discover_rule_report(source, recursive=self._get_recursive())
         except Exception as exc:
             self._status(f"陌生规则扫描失败：{exc}")
             return
 
+        suggestions = report.get("suggestions", [])
+        covered = report.get("covered", [])
         self._rule_suggestions = suggestions
-        table = self._set_result_columns("匹配数", "示例文件名", "建议正则", "规则签名")
-        for item in suggestions[:200]:
-            examples = item.get("examples") or []
-            example = Path(examples[0].get("file", "")).name if examples else ""
-            regex = (item.get("suggestion") or {}).get("regex", "")
-            table.add_row(str(item.get("count", 0)), example, regex, item.get("signature", ""))
+        self._covered_rules = covered
+        if suggestions:
+            table = self._set_result_columns("匹配数", "示例文件名", "建议正则", "规则签名")
+            for item in suggestions[:200]:
+                examples = item.get("examples") or []
+                example = Path(examples[0].get("file", "")).name if examples else ""
+                regex = (item.get("suggestion") or {}).get("regex", "")
+                table.add_row(str(item.get("count", 0)), example, regex, item.get("signature", ""))
+        else:
+            table = self._set_result_columns("状态", "匹配数", "示例文件名", "规则ID", "规则名称")
+            for item in covered[:200]:
+                examples = item.get("examples") or []
+                example = Path(examples[0].get("file", "")).name if examples else ""
+                table.add_row("已覆盖", str(item.get("count", 0)), example, str(item.get("id", "")), item.get("name", ""))
 
         self._summary(
             "陌生规则确认\n"
-            f"发现候选规则：{len(suggestions)} 条\n"
-            "1. 在右侧表格中选中一条候选规则。\n"
-            "2. 查看示例文件名和建议正则。\n"
-            "3. 确认无误后点击“加入选中规则”。"
+            f"扫描文件：{report.get('files_count', 0)}\n"
+            f"可新增候选：{len(suggestions)} 条    已有规则覆盖：{len(covered)} 条\n"
+            "如果右侧显示“已覆盖”，说明这些命名格式已经被对应 JSON 规则识别，不需要重复加入。\n"
+            "如果右侧显示候选规则，选中后可点击“加入选中规则”。"
         )
-        self._status("扫描完成。选中一条候选规则后再加入。")
+        if suggestions:
+            self._status("扫描完成。选中一条候选规则后再加入。")
+        elif covered:
+            self._status("扫描完成：未发现陌生规则，已有规则覆盖这些文件名。")
+        else:
+            self._status("扫描完成：未发现可识别的文件名日期规则。")
 
     @on(Button.Pressed, "#add_rule_button")
     def _on_add_rule(self) -> None:
@@ -870,7 +912,7 @@ class PhotoRenamerApp(App):
         item = self._rule_suggestions[idx]
         signature = item.get("signature", "")
         try:
-            result = add_pattern_suggestion(signature)
+            result = add_pattern_suggestion(signature, suggestion=item.get("suggestion"))
         except Exception as exc:
             self._status(f"写入规则失败：{exc}")
             return
@@ -899,6 +941,7 @@ class PhotoRenamerApp(App):
             return
 
         self._format_profiles = profiles
+        self._selected_format_name = ""
         table = self._set_result_columns("启动默认", "名称", "格式表达式", "类型", "示例")
         for profile in profiles:
             fmt = profile.get("format", "")
@@ -918,6 +961,35 @@ class PhotoRenamerApp(App):
         )
         self._status("格式列表已加载。选中一条后可编辑或设为启动默认。")
 
+    @on(Button.Pressed, "#patterns_button")
+    def _on_patterns(self) -> None:
+        self._ui_mode = "patterns"
+        try:
+            rules = load_pattern_rules()
+        except Exception as exc:
+            self._status(f"识别规则加载失败：{exc}")
+            return
+
+        self._pattern_rules = rules
+        table = self._set_result_columns("ID", "规则名称", "捕获组", "类型", "正则")
+        for rule in rules:
+            table.add_row(
+                str(rule.get("id", "")),
+                rule.get("name", ""),
+                str(rule.get("group_count", "")),
+                "自有输出" if rule.get("is_own_output") else "识别规则",
+                rule.get("regex", ""),
+            )
+
+        self._summary(
+            "识别规则管理\n"
+            f"读取文件：{get_pattern_config_path()}\n"
+            f"JSON 条目数：{len(rules)}    表格行数：{table.row_count}\n"
+            "表格可滚动查看全部规则；ID 用于定位规则，可能不连续，不代表条目数量。\n"
+            "选中一行后可在左侧编辑名称和正则；保存会覆盖该规则，删除会从 JSON 移除。"
+        )
+        self._status("识别规则列表已加载。选中一条后可编辑或删除。")
+
     @on(DataTable.RowSelected, "#results")
     def _on_row_selected(self, event: DataTable.RowSelected) -> None:
         idx = event.cursor_row
@@ -927,6 +999,7 @@ class PhotoRenamerApp(App):
         if self._ui_mode == "formats" and idx < len(self._format_profiles):
             profile = self._format_profiles[idx]
             fmt = profile.get("format", "")
+            self._selected_format_name = profile.get("name", "")
             self.query_one("#fmt_name_input", Input).value = profile.get("name", "")
             self.query_one("#fmt_expr_input", Input).value = fmt
             self._summary(
@@ -935,6 +1008,21 @@ class PhotoRenamerApp(App):
                 f"格式：{fmt}\n"
                 f"示例：{_format_example(fmt)}.jpg\n"
                 f"类型：{'内置' if profile.get('builtin') else '自定义'}"
+            )
+            return
+
+        if self._ui_mode == "patterns" and idx < len(self._pattern_rules):
+            rule = self._pattern_rules[idx]
+            self.query_one("#fmt_name_input", Input).value = rule.get("name", "")
+            self.query_one("#fmt_expr_input", Input).value = rule.get("regex", "")
+            self._summary(
+                "识别规则预览\n"
+                f"ID：{rule.get('id', '')}\n"
+                f"名称：{rule.get('name', '')}\n"
+                f"捕获组：{rule.get('group_count', '')}\n"
+                f"顺序：{rule.get('group_order', 'YMDhms')}\n"
+                f"类型：{'自有输出' if rule.get('is_own_output') else '识别规则'}\n"
+                "保存会保留捕获组和顺序设置，只更新名称和正则。"
             )
             return
 
@@ -954,6 +1042,24 @@ class PhotoRenamerApp(App):
                 f"示例文件名：\n{example_text}\n"
                 "确认这些示例属于同一类命名规则后，再点击“加入选中规则”。"
             )
+            return
+
+        if self._ui_mode == "rules" and not self._rule_suggestions and idx < len(self._covered_rules):
+            item = self._covered_rules[idx]
+            examples = item.get("examples") or []
+            example_text = "\n".join(
+                f"- {Path(entry.get('file', '')).name}  (匹配片段: {entry.get('match_text', '')})"
+                for entry in examples[:4]
+            )
+            self._summary(
+                "已有规则覆盖\n"
+                f"规则 ID：{item.get('id', '')}\n"
+                f"规则名称：{item.get('name', '')}\n"
+                f"匹配文件：{item.get('count', 0)} 个\n"
+                f"正则：{item.get('regex', '')}\n"
+                f"示例文件名：\n{example_text}\n"
+                "这不是陌生规则，不需要重复加入；如需调整，请打开“识别规则列表（JSON）”。"
+            )
 
     @on(Button.Pressed, "#save_format_button")
     def _on_save_format(self) -> None:
@@ -962,14 +1068,76 @@ class PhotoRenamerApp(App):
         if not name or not expr:
             self._status("格式名称和表达式不能为空。")
             return
+
+        if self._ui_mode == "patterns":
+            table = self.query_one("#results", DataTable)
+            idx = table.cursor_row
+            selected = self._pattern_rules[idx] if idx is not None and 0 <= idx < len(self._pattern_rules) else None
+            try:
+                result = save_pattern_rule(
+                    name,
+                    expr,
+                    rule_id=selected.get("id") if selected else None,
+                    fallback_index=selected.get("index") if selected else None,
+                    group_count=selected.get("group_count") if selected else None,
+                    group_order=selected.get("group_order", "") if selected else "",
+                    ampm_group=selected.get("ampm_group") if selected else None,
+                    is_own_output=bool(selected.get("is_own_output")) if selected else False,
+                )
+            except Exception as exc:
+                self._status(f"保存识别规则失败：{exc}")
+                return
+            self._on_patterns()
+            self._status(f"识别规则已保存：{result.get('id', '')}")
+            return
+
         try:
-            save_format_profile(name, expr, make_current=False)
+            save_format_profile(name, expr, make_current=False, original_name=self._selected_format_name)
         except Exception as exc:
             self._status(f"保存格式失败：{exc}")
             return
         self._refresh_format_select()
         self._on_formats()
         self._status(f"格式已保存：{name}")
+
+    @on(Button.Pressed, "#delete_format_button")
+    def _on_delete_format(self) -> None:
+        table = self.query_one("#results", DataTable)
+        idx = table.cursor_row
+        if idx is None or idx < 0:
+            self._status("请先在右侧表格中选中一条记录。")
+            return
+
+        if self._ui_mode == "patterns":
+            if idx >= len(self._pattern_rules):
+                self._status("选中行超出识别规则范围。")
+                return
+            rule = self._pattern_rules[idx]
+            try:
+                removed = delete_pattern_rule(rule_id=rule.get("id"), fallback_index=rule.get("index"))
+            except Exception as exc:
+                self._status(f"删除识别规则失败：{exc}")
+                return
+            self._on_patterns()
+            self._status(f"识别规则已删除：{removed.get('description', removed.get('id', ''))}")
+            return
+
+        if self._ui_mode == "formats":
+            if idx >= len(self._format_profiles):
+                self._status("选中行超出格式范围。")
+                return
+            profile = self._format_profiles[idx]
+            try:
+                removed = delete_format_profile(profile.get("name", ""))
+            except Exception as exc:
+                self._status(f"删除格式失败：{exc}")
+                return
+            self._refresh_format_select()
+            self._on_formats()
+            self._status(f"格式已删除：{removed.get('name', '')}")
+            return
+
+        self._status("请先打开格式列表或识别规则列表。")
 
     @on(Button.Pressed, "#set_current_button")
     def _on_set_current(self) -> None:

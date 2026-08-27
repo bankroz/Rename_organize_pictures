@@ -88,6 +88,67 @@ def _escape_csv_cell(value):
     return value
 
 
+_MONTH_NAME_LOOKUP = {
+    'jan': 1, 'january': 1,
+    'feb': 2, 'february': 2,
+    'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4,
+    'may': 5,
+    'jun': 6, 'june': 6,
+    'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8,
+    'sep': 9, 'sept': 9, 'september': 9,
+    'oct': 10, 'october': 10,
+    'nov': 11, 'november': 11,
+    'dec': 12, 'december': 12,
+}
+
+MONTH_NAME_RE = (
+    r'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|'
+    r'Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?'
+)
+AMPM_RE = r'AM|PM|am|pm|A\.M\.|P\.M\.|a\.m\.|p\.m\.|上午|下午'
+
+
+def _coerce_year(value: Any) -> int:
+    text = str(value).strip()
+    year = int(text)
+    if len(text) == 2:
+        return 2000 + year if year <= 69 else 1900 + year
+    return year
+
+
+def _coerce_month(value: Any) -> int:
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    key = re.sub(r'[^A-Za-z]', '', text).lower()
+    if key in _MONTH_NAME_LOOKUP:
+        return _MONTH_NAME_LOOKUP[key]
+    raise ValueError(f'unsupported month value: {value}')
+
+
+def _coerce_datetime_part(field: str, value: Any) -> int:
+    if field == 'Y':
+        return _coerce_year(value)
+    if field == 'M':
+        return _coerce_month(value)
+    return int(str(value).strip())
+
+
+def _apply_ampm(hour: int, ampm: Any) -> int:
+    marker = str(ampm or '').strip().lower().replace('.', '')
+    if not marker:
+        return hour
+    if not (1 <= hour <= 12):
+        raise ValueError('12-hour time must use hour 1-12')
+    if marker in ('am', 'a', '上午'):
+        return 0 if hour == 12 else hour
+    if marker in ('pm', 'p', '下午'):
+        return hour if hour == 12 else hour + 12
+    raise ValueError(f'unsupported AM/PM marker: {ampm}')
+
+
 def _escape_csv_row(row: dict) -> dict:
     return {key: _escape_csv_cell(value) for key, value in row.items()}
 
@@ -271,13 +332,17 @@ def _get_exe_dir() -> Path:
 
 
 def _find_config_path() -> Path:
-    """查找 patterns.json：优先自定义路径 → CWD → exe/脚本目录"""
+    """查找 patterns.json：优先自定义路径；绿色 EXE 优先使用同目录配置。"""
     if _PATTERN_CONFIG_PATH:
         return Path(_PATTERN_CONFIG_PATH)
+    exe_dir = _get_exe_dir()
+    exe_config = exe_dir / 'patterns.json'
+    if getattr(sys, 'frozen', False) and exe_config.exists():
+        return exe_config
     cwd = Path.cwd() / 'patterns.json'
     if cwd.exists():
         return cwd
-    return _get_exe_dir() / 'patterns.json'
+    return exe_config
 
 
 def get_video_metadata_timeout() -> float:
@@ -327,6 +392,9 @@ def _validate_pattern_entry(entry: dict, index: int):
         raise ValueError(f'第 {index} 个模式 group_order 长度不足')
     if any(ch not in 'YMDhms' for ch in group_order[:group_count]):
         raise ValueError(f'第 {index} 个模式 group_order 含无效字段')
+    ampm_group = entry.get('ampm_group')
+    if ampm_group is not None and (not isinstance(ampm_group, int) or ampm_group < 1):
+        raise ValueError(f'第 {index} 个模式 ampm_group 必须为正整数')
 
 
 def _load_patterns_from_json(json_path: Path) -> list:
@@ -344,6 +412,9 @@ def _load_patterns_from_json(json_path: Path) -> list:
         compiled = re.compile(entry['regex'])
         if compiled.groups < entry['group_count']:
             raise ValueError(f'第 {idx} 个模式捕获组数量不足')
+        ampm_group = entry.get('ampm_group')
+        if ampm_group is not None and ampm_group > compiled.groups:
+            raise ValueError(f'第 {idx} 个模式 ampm_group 超出捕获组数量')
         patterns.append((compiled, dict(entry)))
     return patterns
 
@@ -593,40 +664,54 @@ class DateExtractor:
                     continue
 
         # ── 标准模式匹配 ──
-        for idx, (pattern, entry) in enumerate(cls._patterns):
-            # 对每个模式遍历所有匹配（而非仅首个），跳过不合法日期直到找到有效的
-            for match in pattern.finditer(stem):
-                groups = match.groups()
-                try:
-                    group_order = entry.get('group_order', 'YMDhms')
-                    values = list(map(int, groups))
-                    gc = len(values)
-
-                    # group_order 中的字符依次对应 values 的各个位置
-                    # 字符含义: Y=年, M=月, D=日, h=时, m=分, s=秒
-                    # 默认 "YMDhms": values[0]=year, values[1]=month, values[2]=day
-                    # iPhone 录屏 "DMYhms": values[0]=day, values[1]=month, values[2]=year
-                    field_values = {}
-                    for i, ch in enumerate(group_order[:gc]):
-                        field_values[ch] = values[i]
-
-                    y = field_values.get('Y', values[0])
-                    mo = field_values.get('M', values[1] if gc >= 2 else 1)
-                    d = field_values.get('D', values[2] if gc >= 3 else 1)
-                    hh = field_values.get('h', 0)
-                    mm = field_values.get('m', 0)
-                    ss = field_values.get('s', 0)
-
-                    dt = datetime(y, mo, d, hh, mm, ss)
-
-                    # 合理性检查
-                    if 1970 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
-                        desc = entry.get('description', f'模式{idx + 1}')
-                        return dt, f'Filename({desc})'
-                except (ValueError, TypeError, KeyError, IndexError):
-                    continue
+        info = cls._match_filename_rule(filepath)
+        if info:
+            return info['datetime'], f"Filename({info['description']})"
 
         return None, ''
+
+    @classmethod
+    def _datetime_from_rule_groups(cls, entry: dict, groups: tuple) -> datetime:
+        group_order = entry.get('group_order', 'YMDhms')
+        gc = entry.get('group_count', len(groups))
+
+        field_values = {}
+        for i, ch in enumerate(group_order[:gc]):
+            field_values[ch] = _coerce_datetime_part(ch, groups[i])
+
+        y = field_values['Y'] if 'Y' in field_values else _coerce_year(groups[0])
+        mo = field_values['M'] if 'M' in field_values else (_coerce_month(groups[1]) if gc >= 2 else 1)
+        d = field_values['D'] if 'D' in field_values else (int(groups[2]) if gc >= 3 else 1)
+        hh = field_values.get('h', 0)
+        mm = field_values.get('m', 0)
+        ss = field_values.get('s', 0)
+        if entry.get('ampm_group') is not None:
+            hh = _apply_ampm(hh, groups[entry['ampm_group'] - 1])
+
+        return datetime(y, mo, d, hh, mm, ss)
+
+    @classmethod
+    def _match_filename_rule(cls, filepath: Path) -> Optional[dict]:
+        cls._ensure_initialized()
+        stem = filepath.stem
+        for idx, (pattern, entry) in enumerate(cls._patterns):
+            for match in pattern.finditer(stem):
+                try:
+                    dt = cls._datetime_from_rule_groups(entry, match.groups())
+                    if 1970 <= dt.year <= 2099 and 1 <= dt.month <= 12 and 1 <= dt.day <= 31:
+                        return {
+                            'index': idx,
+                            'id': entry.get('id', idx + 1),
+                            'description': entry.get('description', f'模式{idx + 1}'),
+                            'regex': entry.get('regex', ''),
+                            'group_count': entry.get('group_count', ''),
+                            'is_own_output': bool(entry.get('is_own_output')),
+                            'match_text': match.group(),
+                            'datetime': dt,
+                        }
+                except (ValueError, TypeError, KeyError, IndexError):
+                    continue
+        return None
 
     @classmethod
     def _is_hash_stem(cls, stem: str) -> bool:
@@ -870,6 +955,9 @@ class DateExtractor:
 
 class PatternDiscoverer:
     """
+
+    _MONTH_RE = MONTH_NAME_RE
+    _AMPM_RE = AMPM_RE
     对未匹配到日期的文件名，用启发式算法检测潜在日期格式。
     按模式签名分组后供用户审核，可导出为 CSV 或生成建议的 JSON 模式条目。
     """
@@ -887,12 +975,34 @@ class PatternDiscoverer:
 
     # 带时间的不同分隔符日期组合
     _EXTENDED_PATTERNS = [
+        # YYYY-MM-DD HH:MM:SS AM/PM
+        (re.compile(rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})[:.\-_](\d{{2}})[:.\-_](\d{{2}})\s*({AMPM_RE})'), 6, 'YYYY-MM-DD HH:MM:SS AMPM', 'YMDhms', 7),
+        # YYYY-MM-DD HH:MM AM/PM
+        (re.compile(rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})[:.\-_](\d{{2}})\s*({AMPM_RE})'), 5, 'YYYY-MM-DD HH:MM AMPM', 'YMDhm', 6),
+        # YYYY-MM-DD HHMMSS AM/PM
+        (re.compile(rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})(\d{{2}})(\d{{2}})\s*({AMPM_RE})'), 6, 'YYYY-MM-DD HHMMSS AMPM', 'YMDhms', 7),
+        # YYYY-MM-DD HHMM AM/PM
+        (re.compile(rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})(\d{{2}})\s*({AMPM_RE})'), 5, 'YYYY-MM-DD HHMM AMPM', 'YMDhm', 6),
+        # YY-MM-DD HH:MM:SS
+        (re.compile(r'(?<!\d)(\d{2})[.\-/_](\d{1,2})[.\-/_](\d{1,2})[ T_-]+(\d{1,2})[:.\-_](\d{2})[:.\-_](\d{2})(?!\d)'), 6, 'YY-MM-DD HH:MM:SS'),
+        # YY-MM-DD HH:MM
+        (re.compile(r'(?<!\d)(\d{2})[.\-/_](\d{1,2})[.\-/_](\d{1,2})[ T_-]+(\d{1,2})[:.\-_](\d{2})(?!\d)'), 5, 'YY-MM-DD HH:MM'),
+        # YY-MM-DD-HHMM
+        (re.compile(r'(?<!\d)(\d{2})[.\-/_](\d{1,2})[.\-/_](\d{1,2})[ T_-]+(\d{2})(\d{2})(?!\d)'), 5, 'YY-MM-DD-HHMM'),
+        # YYYY-MON-DD / MON-DD-YYYY / DD-MON-YYYY
+        (re.compile(rf'(?<![A-Za-z0-9])(\d{{4}})[.\-_\s]+({MONTH_NAME_RE})[.\-_\s]+(\d{{1,2}})(?:st|nd|rd|th)?(?![A-Za-z0-9])', re.IGNORECASE), 3, 'YYYY-MON-DD'),
+        (re.compile(rf'(?<![A-Za-z0-9])({MONTH_NAME_RE})[.\-_\s]+(\d{{1,2}})(?:st|nd|rd|th)?[,\-_\s]+(\d{{4}})(?![A-Za-z0-9])', re.IGNORECASE), 3, 'MON-DD-YYYY', 'MDY'),
+        (re.compile(rf'(?<![A-Za-z0-9])(\d{{1,2}})(?:st|nd|rd|th)?[.\-_\s]+({MONTH_NAME_RE})[,\-_\s]+(\d{{4}})(?![A-Za-z0-9])', re.IGNORECASE), 3, 'DD-MON-YYYY', 'DMY'),
         # YYYY-MM-DD HH:MM:SS
         (re.compile(r'(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})'), 6, 'YYYY-MM-DD HH:MM:SS'),
         # YYYY-MM-DD HH-MM-SS
         (re.compile(r'(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})'), 6, 'YYYY-MM-DD HH-MM-SS'),
         # YYYY-MM-DD-HH-MM-SS
         (re.compile(r'(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})'), 6, 'YYYY-MM-DD-HH-MM-SS'),
+        # YYYY-MM-DD-HHMMSS
+        (re.compile(r'(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})(?!\d)'), 6, 'YYYY-MM-DD-HHMMSS'),
+        # YYYY-MM-DD-HHMM
+        (re.compile(r'(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(?!\d)'), 5, 'YYYY-MM-DD-HHMM'),
         # YYYY/MM/DD HH:MM:SS
         (re.compile(r'(\d{4})/(\d{2})/(\d{2}) (\d{2}):(\d{2}):(\d{2})'), 6, 'YYYY/MM/DD HH:MM:SS'),
         # YYYY/MM/DD
@@ -904,6 +1014,87 @@ class PatternDiscoverer:
         # YYYY年MM月DD日 HH:MM:SS
         (re.compile(r'(\d{4})年(\d{2})月(\d{2})日 (\d{2}):(\d{2}):(\d{2})'), 6, 'YYYY年MM月DD日 HH:MM:SS'),
     ]
+
+    _SIGNATURE_SUGGESTIONS = {
+        'YYYY-MM-DD-HHMM': {
+            "regex": r'(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(?!\d)',
+            "group_count": 5,
+            "description": "YYYY-MM-DD-HHMM（自动发现）",
+            "is_own_output": False,
+        },
+        'YYYY-MM-DD HH:MM:SS AMPM': {
+            "regex": rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})[:.\-_](\d{{2}})[:.\-_](\d{{2}})\s*({AMPM_RE})',
+            "group_count": 6,
+            "description": "YYYY-MM-DD HH:MM:SS AMPM（自动发现）",
+            "is_own_output": False,
+            "ampm_group": 7,
+        },
+        'YYYY-MM-DD HH:MM AMPM': {
+            "regex": rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})[:.\-_](\d{{2}})\s*({AMPM_RE})',
+            "group_count": 5,
+            "description": "YYYY-MM-DD HH:MM AMPM（自动发现）",
+            "is_own_output": False,
+            "ampm_group": 6,
+        },
+        'YYYY-MM-DD HHMMSS AMPM': {
+            "regex": rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})(\d{{2}})(\d{{2}})\s*({AMPM_RE})',
+            "group_count": 6,
+            "description": "YYYY-MM-DD HHMMSS AMPM（自动发现）",
+            "is_own_output": False,
+            "ampm_group": 7,
+        },
+        'YYYY-MM-DD HHMM AMPM': {
+            "regex": rf'(\d{{4}})[.\-/_](\d{{1,2}})[.\-/_](\d{{1,2}})[ T_-]+(\d{{1,2}})(\d{{2}})\s*({AMPM_RE})',
+            "group_count": 5,
+            "description": "YYYY-MM-DD HHMM AMPM（自动发现）",
+            "is_own_output": False,
+            "ampm_group": 6,
+        },
+        'YYYY-MM-DD-HHMMSS': {
+            "regex": r'(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})(?!\d)',
+            "group_count": 6,
+            "description": "YYYY-MM-DD-HHMMSS（自动发现）",
+            "is_own_output": False,
+        },
+        'YY-MM-DD HH:MM:SS': {
+            "regex": r'(?<!\d)(\d{2})[.\-/_](\d{1,2})[.\-/_](\d{1,2})[ T_-]+(\d{1,2})[:.\-_](\d{2})[:.\-_](\d{2})(?!\d)',
+            "group_count": 6,
+            "description": "YY-MM-DD HH:MM:SS（自动发现）",
+            "is_own_output": False,
+        },
+        'YY-MM-DD HH:MM': {
+            "regex": r'(?<!\d)(\d{2})[.\-/_](\d{1,2})[.\-/_](\d{1,2})[ T_-]+(\d{1,2})[:.\-_](\d{2})(?!\d)',
+            "group_count": 5,
+            "description": "YY-MM-DD HH:MM（自动发现）",
+            "is_own_output": False,
+        },
+        'YY-MM-DD-HHMM': {
+            "regex": r'(?<!\d)(\d{2})[.\-/_](\d{1,2})[.\-/_](\d{1,2})[ T_-]+(\d{2})(\d{2})(?!\d)',
+            "group_count": 5,
+            "description": "YY-MM-DD-HHMM（自动发现）",
+            "is_own_output": False,
+        },
+        'YYYY-MON-DD': {
+            "regex": rf'(?<![A-Za-z0-9])(\d{{4}})[.\-_\s]+({MONTH_NAME_RE})[.\-_\s]+(\d{{1,2}})(?:st|nd|rd|th)?(?![A-Za-z0-9])',
+            "group_count": 3,
+            "description": "YYYY-MON-DD（自动发现）",
+            "is_own_output": False,
+        },
+        'MON-DD-YYYY': {
+            "regex": rf'(?<![A-Za-z0-9])({MONTH_NAME_RE})[.\-_\s]+(\d{{1,2}})(?:st|nd|rd|th)?[,\-_\s]+(\d{{4}})(?![A-Za-z0-9])',
+            "group_count": 3,
+            "description": "MON-DD-YYYY（自动发现）",
+            "is_own_output": False,
+            "group_order": "MDY",
+        },
+        'DD-MON-YYYY': {
+            "regex": rf'(?<![A-Za-z0-9])(\d{{1,2}})(?:st|nd|rd|th)?[.\-_\s]+({MONTH_NAME_RE})[,\-_\s]+(\d{{4}})(?![A-Za-z0-9])',
+            "group_count": 3,
+            "description": "DD-MON-YYYY（自动发现）",
+            "is_own_output": False,
+            "group_order": "DMY",
+        },
+    }
 
     # 非 Y-M-D 顺序（需要特别标注，D-M-Y 或 M-D-Y 可能歧义）
     _ALT_ORDER_PATTERNS = [
@@ -942,25 +1133,29 @@ class PatternDiscoverer:
         discoveries: Dict[str, list] = {}
 
         for fp in filepaths:
-            # 跳过已被现有规则识别的文件：文件名规则或 Unix 时间戳规则
+            # 跳过已有的高置信文件名规则。只有日期的宽松规则不能屏蔽更高精度的候选时间。
+            stem = fp.stem
+            has_ampm_marker = re.search(rf'(?<![A-Za-z])(?:{AMPM_RE})(?![A-Za-z])', stem, re.IGNORECASE) is not None
             if existing_extractor:
-                dt, _ = existing_extractor._from_filename(fp)
-                if dt:
-                    continue
                 dt, _ = existing_extractor._from_timestamp(fp)
                 if dt:
                     continue
-
-            stem = fp.stem
+                dt, source = existing_extractor._from_filename(fp)
+                if dt and (dt.hour != 0 or dt.minute != 0 or dt.second != 0):
+                    if not has_ampm_marker or 'AMPM' in source:
+                        continue
             found = None
 
             # 阶段1: 精确的扩展格式（含时间，优先级高）
-            for pattern, group_count, signature in cls._EXTENDED_PATTERNS:
+            for candidate in cls._EXTENDED_PATTERNS:
+                pattern, group_count, signature = candidate[:3]
+                group_order = candidate[3] if len(candidate) >= 4 else 'YMDhms'
+                ampm_group = candidate[4] if len(candidate) >= 5 else None
                 for m in pattern.finditer(stem):
                     groups = m.groups()
                     try:
-                        if cls._validate_date_groups(groups, group_count):
-                            dt = cls._groups_to_datetime(groups, group_count)
+                        if cls._validate_date_groups(groups, group_count, group_order, ampm_group):
+                            dt = cls._groups_to_datetime(groups, group_count, group_order, ampm_group)
                             found = (m.group(), dt, signature, 'standard')
                             break
                     except (ValueError, TypeError):
@@ -1047,19 +1242,15 @@ class PatternDiscoverer:
         return discoveries
 
     @classmethod
-    def _validate_date_groups(cls, groups: tuple, group_count: int) -> bool:
+    def _validate_date_groups(cls, groups: tuple, group_count: int,
+                              group_order: str = 'YMDhms',
+                              ampm_group: Optional[int] = None) -> bool:
         """验证 Y-M-D 顺序的捕获组是否构成合法日期"""
-        y, mo, d = int(groups[0]), int(groups[1]), int(groups[2])
+        y, mo, d, h, mi, s = cls._datetime_parts_from_groups(groups, group_count, group_order, ampm_group)
         if not (1970 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31):
             return False
-        if group_count >= 6:
-            h, mi, s = int(groups[3]), int(groups[4]), int(groups[5])
-            if not (0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59):
-                return False
-        if group_count == 5:
-            h, mi = int(groups[3]), int(groups[4])
-            if not (0 <= h <= 23 and 0 <= mi <= 59):
-                return False
+        if not (0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59):
+            return False
         return True
 
     @classmethod
@@ -1075,14 +1266,28 @@ class PatternDiscoverer:
         return valid_dmy or valid_mdy
 
     @classmethod
-    def _groups_to_datetime(cls, groups: tuple, group_count: int) -> datetime:
-        """将 Y-M-D 顺序的捕获组转为 datetime"""
-        y, mo, d = int(groups[0]), int(groups[1]), int(groups[2])
-        h = mi = s = 0
-        if group_count == 5:
-            h, mi = int(groups[3]), int(groups[4])
-        elif group_count == 6:
-            h, mi, s = int(groups[3]), int(groups[4]), int(groups[5])
+    def _datetime_parts_from_groups(cls, groups: tuple, group_count: int,
+                                    group_order: str = 'YMDhms',
+                                    ampm_group: Optional[int] = None) -> tuple:
+        field_values = {}
+        for i, ch in enumerate(group_order[:group_count]):
+            field_values[ch] = _coerce_datetime_part(ch, groups[i])
+        y = field_values['Y'] if 'Y' in field_values else _coerce_year(groups[0])
+        mo = field_values['M'] if 'M' in field_values else (_coerce_month(groups[1]) if group_count >= 2 else 1)
+        d = field_values['D'] if 'D' in field_values else (int(groups[2]) if group_count >= 3 else 1)
+        h = field_values.get('h', 0)
+        mi = field_values.get('m', 0)
+        s = field_values.get('s', 0)
+        if ampm_group is not None:
+            h = _apply_ampm(h, groups[ampm_group - 1])
+        return y, mo, d, h, mi, s
+
+    @classmethod
+    def _groups_to_datetime(cls, groups: tuple, group_count: int,
+                            group_order: str = 'YMDhms',
+                            ampm_group: Optional[int] = None) -> datetime:
+        """将捕获组转为 datetime，支持两位年份、英文月份和 12 小时制。"""
+        y, mo, d, h, mi, s = cls._datetime_parts_from_groups(groups, group_count, group_order, ampm_group)
         return datetime(y, mo, d, h, mi, s)
 
     @classmethod
@@ -1141,6 +1346,8 @@ class PatternDiscoverer:
         """
         # 剥离歧义标注后缀
         clean_sig = signature.replace('(*)', '').strip()
+        if clean_sig in cls._SIGNATURE_SUGGESTIONS:
+            return dict(cls._SIGNATURE_SUGGESTIONS[clean_sig])
 
         # 紧凑格式
         if clean_sig == 'YYYYMMDD':
@@ -1218,15 +1425,17 @@ class PatternDiscoverer:
 
         # 检测非标准 group_order（如 DD-MM-YYYY 需要设为 DMYhms）
         field_order = []
+        seen_time = False
         for kind, _ in parts:
             if kind == 'YYYY':
                 field_order.append('Y')
             elif kind == 'MM':
-                field_order.append('M')
+                field_order.append('m' if seen_time else 'M')
             elif kind == 'DD':
                 field_order.append('D')
             elif kind == 'HH':
                 field_order.append('h')
+                seen_time = True
             elif kind == 'SS':
                 field_order.append('s')
         if field_order:
@@ -1632,13 +1841,12 @@ def _write_config_document(config: dict, config_path: str = '') -> Path:
     return path
 
 
-def discover_rule_suggestions(source_dir: str, recursive: bool = False,
-                              ext_arg: str = '') -> list:
-    """Return PatternDiscoverer suggestions in a TUI-friendly structure."""
-    DateExtractor._ensure_initialized()
-    renamer = PhotoRenamer(source_dir, recursive=recursive, exts=_parse_exts(ext_arg))
-    files = renamer.scan_files()
-    discoveries = PatternDiscoverer.discover(files, existing_extractor=DateExtractor)
+def get_pattern_config_path(config_path: str = '') -> str:
+    """Return the patterns.json path currently used by config-backed features."""
+    return str(Path(config_path) if config_path else _find_config_path())
+
+
+def _format_rule_suggestions(discoveries: Dict[str, list]) -> list:
     suggestions = []
     for sig in sorted(discoveries.keys(), key=lambda s: (-len(discoveries[s]), s)):
         items = discoveries[sig]
@@ -1659,21 +1867,208 @@ def discover_rule_suggestions(source_dir: str, recursive: bool = False,
     return suggestions
 
 
-def add_pattern_suggestion(signature: str, config_path: str = '') -> Optional[dict]:
+def _collect_existing_rule_coverage(files: list) -> list:
+    covered: Dict[tuple, dict] = {}
+    for fp in files:
+        info = DateExtractor._match_filename_rule(fp)
+        if not info:
+            continue
+        key = (info.get('id'), info.get('description'))
+        if key not in covered:
+            covered[key] = {
+                'id': info.get('id'),
+                'index': info.get('index'),
+                'name': info.get('description', ''),
+                'regex': info.get('regex', ''),
+                'group_count': info.get('group_count', ''),
+                'is_own_output': info.get('is_own_output', False),
+                'count': 0,
+                'examples': [],
+            }
+        item = covered[key]
+        item['count'] += 1
+        if len(item['examples']) < 5:
+            item['examples'].append({
+                'file': str(fp),
+                'match_text': info.get('match_text', ''),
+                'datetime': info['datetime'].strftime('%Y-%m-%d %H:%M:%S'),
+            })
+    return sorted(covered.values(), key=lambda item: (-item['count'], item.get('index', 0)))
+
+
+def discover_rule_report(source_dir: str, recursive: bool = False,
+                         ext_arg: str = '') -> dict:
+    """Return unknown rule suggestions plus existing rules that already cover files."""
+    DateExtractor._ensure_initialized()
+    renamer = PhotoRenamer(source_dir, recursive=recursive, exts=_parse_exts(ext_arg))
+    files = renamer.scan_files()
+    discoveries = PatternDiscoverer.discover(files, existing_extractor=DateExtractor)
+    return {
+        'files_count': len(files),
+        'suggestions': _format_rule_suggestions(discoveries),
+        'covered': _collect_existing_rule_coverage(files),
+    }
+
+
+def discover_rule_suggestions(source_dir: str, recursive: bool = False,
+                              ext_arg: str = '') -> list:
+    """Return PatternDiscoverer suggestions in a TUI-friendly structure."""
+    return discover_rule_report(source_dir, recursive, ext_arg)['suggestions']
+
+
+def _pattern_identity(entry: dict) -> tuple:
+    return (
+        _normalize_pattern_regex(entry.get('regex', '')),
+        entry.get('group_count'),
+        entry.get('group_order', 'YMDhms'),
+        entry.get('ampm_group'),
+    )
+
+
+def _normalize_pattern_regex(regex: str) -> str:
+    return str(regex).replace(r'(?<!\d)', '').replace(r'(?!\d)', '')
+
+
+def _pattern_insert_index(patterns: list, suggestion: dict) -> int:
+    group_count = suggestion.get('group_count', 0)
+    has_ampm = suggestion.get('ampm_group') is not None
+    for idx, entry in enumerate(patterns):
+        if entry.get('is_own_output'):
+            continue
+        if has_ampm and entry.get('ampm_group') is None and entry.get('group_count', 0) == group_count:
+            return idx
+        if entry.get('group_count', 0) < group_count:
+            return idx
+    return len(patterns)
+
+
+def add_pattern_suggestion(signature: str, config_path: str = '',
+                           suggestion: Optional[dict] = None) -> Optional[dict]:
     """Append one generated pattern suggestion to patterns.json."""
-    suggestion = PatternDiscoverer.generate_json_suggestion(signature)
-    if not suggestion:
+    generated = dict(suggestion or PatternDiscoverer.generate_json_suggestion(signature) or {})
+    if not generated:
         return None
+    generated['description'] = f'{signature}（用户确认添加）'
     config = _load_config_document(config_path)
     patterns = config.setdefault('patterns', [])
-    max_id = max((p.get('id', 0) for p in patterns), default=0)
-    suggestion['id'] = max_id + 1
-    suggestion['description'] = signature + '（用户确认添加）'
-    _validate_pattern_entry(suggestion, len(patterns) + 1)
-    patterns.append(suggestion)
+    identity = _pattern_identity(generated)
+    existing_ids = [p.get('id') for p in patterns if _pattern_identity(p) == identity and p.get('id') is not None]
+    patterns[:] = [p for p in patterns if _pattern_identity(p) != identity]
+
+    if existing_ids:
+        generated['id'] = existing_ids[0]
+    else:
+        max_id = max((p.get('id', 0) for p in patterns), default=0)
+        generated['id'] = max_id + 1
+
+    _validate_pattern_entry(generated, len(patterns) + 1)
+    patterns.insert(_pattern_insert_index(patterns, generated), generated)
     _write_config_document(config, config_path)
     DateExtractor.reload_patterns(config_path)
-    return suggestion
+    return generated
+
+
+def load_pattern_rules(config_path: str = '') -> list:
+    """Load filename recognition rules from patterns.json in stored order."""
+    config = _load_config_document(config_path)
+    rules = []
+    for index, entry in enumerate(config.get('patterns', [])):
+        rules.append({
+            'index': index,
+            'id': entry.get('id', index + 1),
+            'name': entry.get('description', f'规则{index + 1}'),
+            'regex': entry.get('regex', ''),
+            'group_count': entry.get('group_count', ''),
+            'group_order': entry.get('group_order', 'YMDhms'),
+            'ampm_group': entry.get('ampm_group'),
+            'is_own_output': bool(entry.get('is_own_output')),
+        })
+    return rules
+
+
+def _find_pattern_index(patterns: list, rule_id: Any = None,
+                        fallback_index: Optional[int] = None) -> int:
+    if rule_id is not None:
+        for idx, entry in enumerate(patterns):
+            if str(entry.get('id', '')) == str(rule_id):
+                return idx
+    if fallback_index is not None and 0 <= fallback_index < len(patterns):
+        return fallback_index
+    raise ValueError('未找到要操作的识别规则')
+
+
+def save_pattern_rule(name: str, regex: str, config_path: str = '',
+                      rule_id: Any = None,
+                      fallback_index: Optional[int] = None,
+                      group_count: Optional[int] = None,
+                      group_order: str = '',
+                      ampm_group: Optional[int] = None,
+                      is_own_output: bool = False) -> dict:
+    """Add or update one filename recognition rule in patterns.json."""
+    if not name.strip():
+        raise ValueError('规则名称不能为空')
+    if not regex.strip():
+        raise ValueError('规则正则不能为空')
+
+    config = _load_config_document(config_path)
+    patterns = config.setdefault('patterns', [])
+    compiled = re.compile(regex)
+
+    if rule_id is not None or fallback_index is not None:
+        idx = _find_pattern_index(patterns, rule_id, fallback_index)
+        updated = dict(patterns[idx])
+        updated['description'] = name.strip()
+        updated['regex'] = regex.strip()
+        if group_count is not None:
+            updated['group_count'] = group_count
+        if group_order:
+            updated['group_order'] = group_order
+        if ampm_group is not None:
+            updated['ampm_group'] = ampm_group
+        elif 'ampm_group' in updated and updated.get('ampm_group') is None:
+            updated.pop('ampm_group', None)
+        _validate_pattern_entry(updated, idx + 1)
+        if compiled.groups < updated['group_count']:
+            raise ValueError('正则捕获组数量不足')
+        if updated.get('ampm_group') is not None and updated['ampm_group'] > compiled.groups:
+            raise ValueError('ampm_group 超出捕获组数量')
+        patterns[idx] = updated
+        saved = updated
+    else:
+        inferred_group_count = group_count if group_count is not None else compiled.groups
+        saved = {
+            'id': max((p.get('id', 0) for p in patterns), default=0) + 1,
+            'regex': regex.strip(),
+            'group_count': inferred_group_count,
+            'description': name.strip(),
+            'is_own_output': bool(is_own_output),
+        }
+        if group_order:
+            saved['group_order'] = group_order
+        if ampm_group is not None:
+            saved['ampm_group'] = ampm_group
+        _validate_pattern_entry(saved, len(patterns) + 1)
+        if compiled.groups < saved['group_count']:
+            raise ValueError('正则捕获组数量不足')
+        if saved.get('ampm_group') is not None and saved['ampm_group'] > compiled.groups:
+            raise ValueError('ampm_group 超出捕获组数量')
+        patterns.insert(_pattern_insert_index(patterns, saved), saved)
+
+    _write_config_document(config, config_path)
+    DateExtractor.reload_patterns(config_path)
+    return saved
+
+
+def delete_pattern_rule(config_path: str = '', rule_id: Any = None,
+                        fallback_index: Optional[int] = None) -> dict:
+    """Delete one filename recognition rule from patterns.json."""
+    config = _load_config_document(config_path)
+    patterns = config.setdefault('patterns', [])
+    idx = _find_pattern_index(patterns, rule_id, fallback_index)
+    removed = patterns.pop(idx)
+    _write_config_document(config, config_path)
+    DateExtractor.reload_patterns(config_path)
+    return removed
 
 
 def load_format_profiles(config_path: str = '') -> list:
@@ -1709,7 +2104,8 @@ def load_format_profiles(config_path: str = '') -> list:
 
 
 def save_format_profile(name: str, fmt: str, config_path: str = '',
-                        make_current: bool = False) -> dict:
+                        make_current: bool = False,
+                        original_name: str = '') -> dict:
     """Add or update a custom filename format profile."""
     if not name.strip():
         raise ValueError('格式名称不能为空')
@@ -1722,8 +2118,10 @@ def save_format_profile(name: str, fmt: str, config_path: str = '',
     if name in FORMAT_PRESETS and FORMAT_PRESETS[name] == fmt:
         saved = {'name': name, 'format': fmt, 'builtin': True}
     else:
-        existing = next((item for item in profiles if item.get('name') == name), None)
+        lookup_name = original_name or name
+        existing = next((item for item in profiles if item.get('name') == lookup_name), None)
         if existing:
+            existing['name'] = name
             existing['format'] = fmt
             saved = existing
         else:
@@ -1738,6 +2136,25 @@ def save_format_profile(name: str, fmt: str, config_path: str = '',
 
     _write_config_document(config, config_path)
     return saved
+
+
+def delete_format_profile(name: str, config_path: str = '') -> dict:
+    """Delete one custom output filename format profile."""
+    if name in FORMAT_PRESETS:
+        raise ValueError('内置输出格式不能删除')
+    config = _load_config_document(config_path)
+    profiles = config.setdefault('output_formats', [])
+    for idx, item in enumerate(profiles):
+        if item.get('name') == name:
+            removed = profiles.pop(idx)
+            if config.get('current_output_format_name') == name:
+                config['current_output_format_name'] = '默认'
+                config['default_output_format'] = FORMAT_PRESETS['默认']
+                global _DEFAULT_OUTPUT_FORMAT
+                _DEFAULT_OUTPUT_FORMAT = FORMAT_PRESETS['默认']
+            _write_config_document(config, config_path)
+            return removed
+    raise ValueError('未找到要删除的输出格式')
 
 
 def _default_history_path() -> Path:
