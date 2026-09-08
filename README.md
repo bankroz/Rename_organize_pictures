@@ -77,7 +77,8 @@ ID 是标识，不代表规则数量。日期来源和时区依赖媒体元数�
 
 ## 源码运行
 
-推荐 Python 3.11+；本次本地验证使用 Python 3.14.3。
+当前桌面预览版源码使用 Python 3.14；发布包内置 Python 3.14.3。
+旧版 Python 在英文 Windows 上可能无法处理中文 strftime 字面量，本版不将其列为已验证运行环境。
 
 ```powershell
 python -m venv .venv

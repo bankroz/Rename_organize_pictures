@@ -5,7 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -451,7 +451,8 @@ class SafetyTests(unittest.TestCase):
         with patch.object(DateExtractor, '_run_ffprobe_json', return_value=(probe, '')):
             dt, source = DateExtractor.extract(Path('20161116.MP4'))
 
-        self.assertEqual(dt, datetime(2016, 10, 18, 18, 7, 47))
+        expected = datetime(2016, 10, 18, 10, 7, 47, tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+        self.assertEqual(dt, expected)
         self.assertEqual(source, 'VideoMetadata(creation_time)')
 
     def test_video_falls_back_to_filename_when_metadata_missing(self):
