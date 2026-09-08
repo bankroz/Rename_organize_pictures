@@ -1,8 +1,10 @@
 import tempfile
 import time
+import threading
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from textual.widgets import DataTable, Input, ProgressBar, Select, Static
 
@@ -177,6 +179,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("错误原因", labels)
 
     async def test_preview_shows_live_progress_while_running(self):
+        release = threading.Event()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "IMG20240101120000.jpg").write_bytes(b"photo")
@@ -196,7 +199,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                         "info": "step1",
                         "done": False,
                     })
-                    time.sleep(0.2)
+                    release.wait(5)
                 return {
                     "mode": "preview",
                     "source_dir": str(root),
@@ -220,10 +223,13 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertGreater(progress.progress, 0)
                     self.assertLess(progress.progress, 100)
                     self.assertIn("1/3", status)
+                    release.set()
             finally:
+                release.set()
                 photo_renamer_tui.run_rename_job = original
 
     async def test_execute_shows_live_progress_while_running(self):
+        release = threading.Event()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "IMG20240101120000.jpg").write_bytes(b"photo")
@@ -251,7 +257,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                         "info": "rename1",
                         "done": False,
                     })
-                    time.sleep(0.2)
+                    release.wait(5)
                 return {
                     "mode": "execute",
                     "source_dir": str(root),
@@ -276,7 +282,9 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertLess(progress.progress, 100)
                     self.assertIn("执行重命名", status)
                     self.assertIn("1/3", status)
+                    release.set()
             finally:
+                release.set()
                 photo_renamer_tui.run_rename_job = original
 
     async def test_format_button_loads_profiles(self):
@@ -375,19 +383,24 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             root = Path(tmp)
             filename = "2022-05-01-2201.jpg"
             (root / filename).write_bytes(b"photo")
-            app = PhotoRenamerApp()
-
-            async with app.run_test() as pilot:
-                app.query_one("#source_input", Input).value = str(root)
-                app._on_rules()
-                await pilot.pause()
-
-                table = app.query_one("#results", DataTable)
-                self.assertEqual(table.row_count, 1)
-                row_key = next(iter(table.rows))
-                cells = [str(cell) for cell in table.get_row(row_key)]
-                self.assertIn(filename, cells[1])
-                self.assertIn("YYYY-MM-DD-HHMM", cells[3])
+            config = root / 'patterns.json'
+            config.write_text(json.dumps({'patterns': [{
+                'id': 14, 'regex': r'(\d{4})-(\d{2})-(\d{2})',
+                'group_count': 3, 'description': 'date only', 'is_own_output': False,
+            }]}), encoding='utf-8')
+            with patch('photo_renamer._find_config_path', return_value=config):
+                app = PhotoRenamerApp()
+                async with app.run_test() as pilot:
+                    app.query_one("#source_input", Input).value = str(root)
+                    app._on_rules()
+                    await pilot.pause()
+                    table = app.query_one("#results", DataTable)
+                    self.assertEqual(table.row_count, 1)
+                    row_key = next(iter(table.rows))
+                    cells = [str(cell) for cell in table.get_row(row_key)]
+                    self.assertIn(filename, cells[1])
+                    self.assertIn("YYYY-MM-DD-HHMM", cells[3])
+            DateExtractor.reload_patterns()
 
     async def test_rule_scan_shows_existing_rule_coverage_when_not_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:

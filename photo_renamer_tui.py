@@ -680,20 +680,24 @@ class PhotoRenamerApp(App):
             )
 
     def _undo_from_csv_path(self, csv_path: str) -> None:
+        if self._job_worker is not None:
+            self._status("当前已有任务在运行。")
+            return
         if not csv_path:
             self._status("没有可撤销的 CSV 记录。")
             return
         self._ui_mode = "undo"
         self._status(f"正在撤销：{csv_path}")
-        try:
+        def task():
             summary = undo_from_csv(csv_path)
-            report_path = write_undo_report(csv_path, summary["details"])
-        except Exception as exc:
-            self._status(f"撤销失败：{exc}")
-            return
-        self._render_undo_details(summary, report_path)
-        self._last_csv_path = ""
-        self._status("撤销完成，详情见右侧表格。")
+            return summary, write_undo_report(csv_path, summary["details"])
+        self._job_mode = "undo"
+        self._set_busy_controls(True)
+        self._job_worker = self.run_worker(task, thread=True, exit_on_error=False)
+
+    def _set_busy_controls(self, busy: bool) -> None:
+        for widget in self.query("Button, Input, Select"):
+            widget.disabled = busy
 
     @on(Select.Changed, "#format_select")
     def _on_format_changed(self, event: Select.Changed) -> None:
@@ -734,7 +738,7 @@ class PhotoRenamerApp(App):
         label = "预览" if mode == "preview" else "执行"
         csv_path = summary.get("csv_path", "")
         history_path = summary.get("history_path", "")
-        if csv_path:
+        if csv_path and mode == "execute":
             self._last_csv_path = csv_path
 
         self._summary_with_csv(
@@ -759,8 +763,22 @@ class PhotoRenamerApp(App):
     def _on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker is not self._job_worker:
             return
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            self._set_busy_controls(False)
         if event.state == WorkerState.SUCCESS:
-            self._complete_job(self._job_mode, event.worker.result or {})
+            mode = self._job_mode
+            result = event.worker.result
+            self._job_worker = None
+            self._job_mode = ""
+            if mode == "rules":
+                self._complete_rules(result)
+            elif mode == "undo":
+                self._render_undo_details(*result)
+                self._last_csv_path = ""
+                self._ui_mode = "idle"
+                self._status("撤销完成，详情见右侧表格。")
+            else:
+                self._complete_job(mode, result or {})
         elif event.state == WorkerState.ERROR:
             label = "预览" if self._job_mode == "preview" else "执行"
             self._set_progress(0, 100)
@@ -784,7 +802,7 @@ class PhotoRenamerApp(App):
             self._refocus_source_input()
             return
 
-        if self._ui_mode == "rename":
+        if self._job_worker is not None:
             self._status("当前已有任务在运行。")
             return
 
@@ -792,6 +810,7 @@ class PhotoRenamerApp(App):
         self._ui_mode = "rename"
         self._job_mode = mode
         self._reset_progress(label)
+        self._set_busy_controls(True)
         self._job_worker = self.run_worker(
             lambda: self._run_job_in_thread(mode),
             name=f"{mode}-job",
@@ -852,6 +871,9 @@ class PhotoRenamerApp(App):
 
     @on(Button.Pressed, "#rules_button")
     def _on_rules(self) -> None:
+        if self._job_worker is not None:
+            self._status("当前已有任务在运行。")
+            return
         source = self._get_source()
         if not source:
             self._status("请先填写源文件夹路径，再扫描陌生规则。")
@@ -859,12 +881,16 @@ class PhotoRenamerApp(App):
 
         self._ui_mode = "rules"
         self._status("正在扫描陌生规则...")
-        try:
-            report = discover_rule_report(source, recursive=self._get_recursive())
-        except Exception as exc:
-            self._status(f"陌生规则扫描失败：{exc}")
-            return
+        recursive = self._get_recursive()
+        self._job_mode = "rules"
+        self._set_busy_controls(True)
+        self._job_worker = self.run_worker(
+            lambda: discover_rule_report(source, recursive=recursive),
+            thread=True, exit_on_error=False,
+        )
 
+    def _complete_rules(self, report: dict) -> None:
+        self._ui_mode = "rules"
         suggestions = report.get("suggestions", [])
         covered = report.get("covered", [])
         self._rule_suggestions = suggestions

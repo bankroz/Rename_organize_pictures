@@ -20,11 +20,43 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+_JOB_LOCK = threading.Lock()
+_READ_SLOTS = threading.BoundedSemaphore(8)
+
+
+def _file_identity(path):
+    stat = Path(path).stat()
+    return f'{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}'
+
+
+def _rename_no_replace(src, dst):
+    if os.name == 'nt':
+        src.rename(dst)
+    else:
+        # link() reserves the destination atomically without overwriting it.
+        os.link(src, dst, follow_symlinks=False)
+        src.unlink()
+
+
+LOG_FIELDS = ['original', 'new_name', 'date', 'source', 'status', 'dst',
+              'error', 'operation', 'identity']
+
+
+def _journal_row(path, row):
+    with open(path, 'a', newline='', encoding='utf-8-sig') as handle:
+        writer = csv.DictWriter(handle, fieldnames=LOG_FIELDS, extrasaction='ignore')
+        writer.writerow(_escape_csv_row(row))
+        handle.flush()
+        os.fsync(handle.fileno())
 
 # ─── 超时保护（网络盘/损坏文件抗卡顿） ─────────────────
 
@@ -42,6 +74,8 @@ WINDOWS_RESERVED_NAMES = {
 
 def _safe_stdout_write(text: str):
     """Write text without crashing on legacy Windows console encodings."""
+    if sys.stdout is None:
+        return
     try:
         sys.stdout.write(text)
     except UnicodeEncodeError:
@@ -52,18 +86,24 @@ def run_with_timeout(func: Callable, *args, timeout: float = None,
                      default: Any = None, **kwargs) -> Any:
     """
     在独立线程中执行 func(*args, **kwargs)，超时返回 default。
-    超时后不等待卡住的 I/O 线程结束，避免网络盘/损坏文件拖死主流程。
+    仅用于只读操作。超时不终止底层 I/O，守护线程和并发上限限制影响。
     """
     t = timeout if timeout is not None else NETWORK_TIMEOUT
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(func, *args, **kwargs)
+    if not _READ_SLOTS.acquire(blocking=False):
+        return default
+    future = concurrent.futures.Future()
+    def read_task():
+        try:
+            future.set_result(func(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        finally:
+            _READ_SLOTS.release()
+    threading.Thread(target=read_task, daemon=True).start()
     try:
         return future.result(timeout=t)
     except (concurrent.futures.TimeoutError, Exception):
-        future.cancel()
         return default
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def is_safe_filename_component(name: str) -> bool:
@@ -163,7 +203,7 @@ class ProgressBar:
         self.total = max(total, 1)
         self.desc = desc
         self.width = width
-        self.disable = disable or not sys.stdout.isatty()
+        self.disable = disable or sys.stdout is None or not sys.stdout.isatty()
         self.callback = callback
         self.stage = stage or desc
         self.current = 0
@@ -191,6 +231,8 @@ class ProgressBar:
         """增加进度并刷新显示"""
         self.current += n
         self._emit(done=False, info=info)
+        if sys.stdout is None:
+            return
         elapsed = time.time() - self._start_time
         elapsed_str = f'{int(elapsed // 60)}m{int(elapsed % 60)}s'
         if self.disable:
@@ -225,6 +267,8 @@ class ProgressBar:
     def close(self):
         """完成时换行"""
         self._emit(done=True)
+        if sys.stdout is None:
+            return
         elapsed = time.time() - self._start_time
         elapsed_str = f'{int(elapsed // 60)}m{int(elapsed % 60)}s'
         if self.disable and self.callback:
@@ -594,8 +638,9 @@ class DateExtractor:
                 return None, 'EXIF(timeout)'
 
             try:
-                img = Image.open(BytesIO(data))
-                exif = img._getexif()
+                with Image.open(BytesIO(data)) as img:
+                    exif = dict(img.getexif())
+                    exif.update(img.getexif().get_ifd(34665))
                 if exif:
                     # 有 EXIF → 提取日期
                     date_fields = ['DateTimeOriginal', 'DateTimeDigitized', 'DateTime']
@@ -825,6 +870,7 @@ class DateExtractor:
                 errors='replace',
                 timeout=get_video_metadata_timeout(),
                 check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
         except subprocess.TimeoutExpired:
             return None, 'VideoMetadata(timeout)'
@@ -1478,9 +1524,13 @@ class PhotoRenamer:
         self.output_dir = Path(output_dir) if output_dir else None
         self.exts = exts or DEFAULT_EXTS
         self.results: list = []  # 用于 CSV 导出
+        self._files = None
+        self.journal_path = ''
 
     def scan_files(self) -> list:
         """扫描所有待处理文件（带进度指示，适配网络盘）"""
+        if self._files is not None:
+            return self._files
         files = []
         last_print = 0
         scan_start = time.time()
@@ -1493,7 +1543,7 @@ class PhotoRenamer:
                         # 每 50 个文件或每 5 秒汇报一次进度
                         now = time.time()
                         if len(files) - last_print >= 50 or (now - scan_start > 5 and len(files) > last_print):
-                            if sys.stdout.isatty():
+                            if sys.stdout is not None and sys.stdout.isatty():
                                 elapsed = int(now - scan_start)
                                 sys.stdout.write(f'\r  扫描中... 已发现 {len(files)} 个文件 [{elapsed}s]')
                                 sys.stdout.flush()
@@ -1503,10 +1553,11 @@ class PhotoRenamer:
             for f in self.source_dir.iterdir():
                 if f.is_file() and f.suffix.lower() in self.exts:
                     files.append(f)
-        if sys.stdout.isatty() and last_print > 0:
+        if sys.stdout is not None and sys.stdout.isatty() and last_print > 0:
             sys.stdout.write('\n')
             sys.stdout.flush()
-        return sorted(files)
+        self._files = sorted(files)
+        return self._files
 
     def process(self, mode: str = 'preview', progress: ProgressBar = None) -> list:
         """
@@ -1589,6 +1640,9 @@ class PhotoRenamer:
         for fp in files:
             dt, source = DateExtractor.extract(fp)
             if dt is None:
+                self.results.append({'original': str(fp), 'new_name': '',
+                                     'dst': '', 'date': '', 'source': source,
+                                     'status': 'error', 'error': '无法提取日期'})
                 tag = '[超时]' if 'timeout' in source else '[无法提取日期]'
                 if 'timeout' in source:
                     progress.timeouts += 1
@@ -1635,6 +1689,13 @@ class PhotoRenamer:
                 extra += 1
                 new_stem = (dt + timedelta(minutes=adjust_offset + extra)).strftime(self.fmt)
 
+            if (dir_key, new_stem, ext) in assigned_stems:
+                self.results.append({'original': str(fp), 'new_name': new_stem + ext,
+                                     'dst': '', 'date': str(dt), 'source': source,
+                                     'status': 'conflict', 'error': '输出格式精度不足，无法分配唯一名称'})
+                progress.update(info=fp.name)
+                continue
+
             assigned_stems.add((dir_key, new_stem, ext))
 
             new_name = f'{new_stem}{ext}'
@@ -1666,7 +1727,8 @@ class PhotoRenamer:
         progress.close()
         return self.results
 
-    def execute(self, progress_callback: Optional[Callable[[dict], None]] = None) -> int:
+    def execute(self, progress_callback: Optional[Callable[[dict], None]] = None,
+                journal_path: str = '') -> int:
         """真正执行重命名/复制，返回成功数"""
         # 第一阶段：计算所有目标路径
         progress = ProgressBar(
@@ -1676,6 +1738,12 @@ class PhotoRenamer:
             stage='analyze',
         )
         results = self.process(mode='execute', progress=progress)
+        journal_path = journal_path or str(self.source_dir / f'rename_log_{uuid.uuid4().hex}.csv')
+        self.journal_path = journal_path
+        with open(journal_path, 'x', newline='', encoding='utf-8-sig') as handle:
+            csv.DictWriter(handle, fieldnames=LOG_FIELDS).writeheader()
+            handle.flush()
+            os.fsync(handle.fileno())
         # process() 已经 close 了 progress，但我们还需要第二阶段进度
 
         # 第二阶段：执行重命名/复制
@@ -1690,6 +1758,7 @@ class PhotoRenamer:
 
         for r in results:
             if r['status'] != 'ok':
+                _journal_row(journal_path, r)
                 exec_pb.update(info='跳过')
                 continue
 
@@ -1697,22 +1766,25 @@ class PhotoRenamer:
             dst = Path(r['dst'])
 
             try:
+                if src.absolute() == dst.absolute():
+                    r['status'] = 'unchanged'
+                    _journal_row(journal_path, r)
+                    exec_pb.update(info='无需改名')
+                    continue
+                r['identity'] = _file_identity(src)
+                r['operation'] = 'copy' if self.output_dir else 'rename'
+                _journal_row(journal_path, {**r, 'status': 'pending'})
                 if self.output_dir:
-                    # 复制模式（带超时保护的网络复制）
+                    # Wait for the actual result; a timeout cannot cancel file mutation.
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     if dst.exists():
                         r['status'] = 'conflict'
                         r['error'] = f'目标文件已存在: {dst}'
                         exec_pb.update(info='冲突')
                         continue
-                    result = run_with_timeout(shutil.copy2, str(src), str(dst),
-                                              timeout=NETWORK_TIMEOUT * 2, default=None)
-                    if result is None:
-                        r['status'] = 'error'
-                        r['error'] = '复制超时（网络延迟）'
-                        exec_pb.timeouts += 1
-                        exec_pb.update(info='超时')
-                        continue
+                    with open(src, 'rb') as source_handle, open(dst, 'xb') as dest_handle:
+                        shutil.copyfileobj(source_handle, dest_handle)
+                    shutil.copystat(src, dst)
                 else:
                     # 重命名模式（同名目录内 rename 通常是原子的，但也加保护）
                     if dst.exists():
@@ -1721,18 +1793,7 @@ class PhotoRenamer:
                         exec_pb.update(info='冲突')
                         continue
 
-                    def do_rename(s, d):
-                        s.rename(d)
-                        return True
-
-                    result = run_with_timeout(do_rename, src, dst,
-                                              timeout=NETWORK_TIMEOUT, default=None)
-                    if result is None:
-                        r['status'] = 'error'
-                        r['error'] = '重命名超时（网络延迟）'
-                        exec_pb.timeouts += 1
-                        exec_pb.update(info='超时')
-                        continue
+                    _rename_no_replace(src, dst)
 
                 success += 1
                 # 执行后更新 original 为实际目标（仅复制模式）
@@ -1745,6 +1806,8 @@ class PhotoRenamer:
                 r['status'] = 'error'
                 r['error'] = str(e)
                 exec_pb.update(info='失败')
+            finally:
+                _journal_row(journal_path, r)
 
         exec_pb.close()
         self.results = results
@@ -1752,7 +1815,9 @@ class PhotoRenamer:
 
     def write_csv(self, csv_path: str):
         """将结果写入 CSV 文件"""
-        fieldnames = ['original', 'new_name', 'date', 'source', 'status', 'dst', 'error']
+        if self.journal_path and Path(csv_path) == Path(self.journal_path):
+            return
+        fieldnames = LOG_FIELDS
         with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
@@ -1769,7 +1834,16 @@ def _resolve_undo_destination(row: dict) -> Path:
     return original.parent / new_name
 
 
-def undo_from_csv(csv_path: str, force: bool = False) -> dict:
+def undo_from_csv(csv_path: str, force: bool = False, progress_callback=None) -> dict:
+    if not _JOB_LOCK.acquire(blocking=False):
+        raise RuntimeError('已有文件任务正在运行')
+    try:
+        return _undo_from_csv(csv_path, force, progress_callback)
+    finally:
+        _JOB_LOCK.release()
+
+
+def _undo_from_csv(csv_path: str, force: bool = False, progress_callback=None) -> dict:
     """
     Undo in-place renames from a rename CSV log.
 
@@ -1782,15 +1856,30 @@ def undo_from_csv(csv_path: str, force: bool = False) -> dict:
     with open(path, newline='', encoding='utf-8-sig') as f:
         rows = list(csv.DictReader(f))
 
+    if any(row.get('operation') == 'preview' for row in rows) or path.name.startswith('preview'):
+        raise ValueError('预览报告不是执行日志，不能撤销')
+    # A journal has a pending row followed by the final state for each source.
+    rows = list({row.get('original', ''): row for row in rows}.values())
+
     summary['rows'] = len(rows)
     for row in reversed(rows):
-        if row.get('status') != 'ok':
+        if progress_callback:
+            progress_callback({'stage': 'undo', 'current': len(summary['details']), 'total': len(rows)})
+        if row.get('status') not in ('ok', 'pending') or row.get('operation') == 'copy':
             summary['skipped'] += 1
             summary['details'].append({**row, 'undo_status': 'skipped', 'undo_error': '非成功记录'})
             continue
 
         original = Path(row.get('original', ''))
         renamed = _resolve_undo_destination(row)
+        if row.get('identity'):
+            try:
+                if _file_identity(renamed) != row['identity']:
+                    raise ValueError('文件身份或内容属性已变化，拒绝撤销')
+            except (OSError, ValueError) as exc:
+                summary['errors'] += 1
+                summary['details'].append({**row, 'undo_status': 'error', 'undo_error': str(exc)})
+                continue
         if not renamed.exists():
             summary['skipped'] += 1
             summary['details'].append({**row, 'undo_status': 'skipped', 'undo_error': f'目标不存在: {renamed}'})
@@ -1801,10 +1890,10 @@ def undo_from_csv(csv_path: str, force: bool = False) -> dict:
             continue
 
         try:
-            if force and original.exists():
-                original.unlink()
+            if original.exists():
+                raise FileExistsError('原文件已存在；为防止丢失数据，不支持强制覆盖')
             original.parent.mkdir(parents=True, exist_ok=True)
-            renamed.rename(original)
+            _rename_no_replace(renamed, original)
             summary['restored'] += 1
             summary['details'].append({**row, 'undo_status': 'restored', 'undo_error': ''})
         except Exception as e:
@@ -1836,8 +1925,18 @@ def _load_config_document(config_path: str = '') -> dict:
 
 def _write_config_document(config: dict, config_path: str = '') -> Path:
     path = Path(config_path) if config_path else _find_config_path()
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                         delete=False) as f:
+            temp_path = Path(f.name)
+            json.dump(config, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
     return path
 
 
@@ -1899,7 +1998,7 @@ def _collect_existing_rule_coverage(files: list) -> list:
 def discover_rule_report(source_dir: str, recursive: bool = False,
                          ext_arg: str = '') -> dict:
     """Return unknown rule suggestions plus existing rules that already cover files."""
-    DateExtractor._ensure_initialized()
+    DateExtractor.reload_patterns()
     renamer = PhotoRenamer(source_dir, recursive=recursive, exts=_parse_exts(ext_arg))
     files = renamer.scan_files()
     discoveries = PatternDiscoverer.discover(files, existing_extractor=DateExtractor)
@@ -2223,6 +2322,15 @@ def _resolve_job_format(fmt_arg: str) -> str:
 
 
 def run_rename_job(options: RenameJobOptions) -> dict:
+    if not _JOB_LOCK.acquire(blocking=False):
+        raise RuntimeError('已有文件任务正在运行')
+    try:
+        return _run_rename_job(options)
+    finally:
+        _JOB_LOCK.release()
+
+
+def _run_rename_job(options: RenameJobOptions) -> dict:
     """
     Callable orchestration layer for CLI/TUI frontends.
 
@@ -2236,7 +2344,7 @@ def run_rename_job(options: RenameJobOptions) -> dict:
         set_pattern_config_path(options.pattern_config)
         DateExtractor.reload_patterns(options.pattern_config)
     else:
-        DateExtractor._ensure_initialized()
+        DateExtractor.reload_patterns()
 
     source_dir = Path(options.source_dir)
     if not source_dir.is_dir():
@@ -2251,6 +2359,8 @@ def run_rename_job(options: RenameJobOptions) -> dict:
         exts=_parse_exts(options.ext_arg),
     )
 
+    if options.progress_callback:
+        options.progress_callback({'stage': 'scan', 'current': 0, 'total': 0})
     files = renamer.scan_files()
     if options.mode == 'preview':
         preview_progress = ProgressBar(
@@ -2261,24 +2371,36 @@ def run_rename_job(options: RenameJobOptions) -> dict:
             stage='preview',
         )
         results = renamer.process(mode='preview', progress=preview_progress)
+        for row in results:
+            row['operation'] = 'preview'
+            if row['status'] == 'ok' and Path(row['dst']).exists() and Path(row['dst']) != Path(row['original']):
+                row['status'] = 'conflict'
+                row['error'] = '目标文件已存在'
         csv_path = options.csv_path or str(source_dir / 'preview_report.csv')
         renamer.write_csv(csv_path)
         ok_count = sum(1 for r in results if r.get('status') == 'ok')
     else:
-        ok_count = renamer.execute(progress_callback=options.progress_callback)
+        csv_path = options.csv_path or str(source_dir / f'rename_log_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}.csv')
+        ok_count = renamer.execute(progress_callback=options.progress_callback, journal_path=csv_path)
         results = renamer.results
-        csv_path = options.csv_path or str(source_dir / 'rename_log.csv')
-        renamer.write_csv(csv_path)
 
-    return {
-        'history_path': str(append_history_report({
+    history_path = ''
+    warning = ''
+    if options.mode == 'execute':
+        try:
+            history_path = str(append_history_report({
             'mode': options.mode,
             'source_dir': str(source_dir),
             'files_count': len(files),
             'ok_count': ok_count,
-            'error_count': sum(1 for r in results if r.get('status') not in ('ok',)),
+            'error_count': sum(1 for r in results if r.get('status') not in ('ok', 'unchanged')),
             'csv_path': csv_path,
-        })) if options.mode == 'execute' else '',
+            }))
+        except OSError as exc:
+            warning = f'文件操作已完成，但历史索引写入失败：{exc}。执行日志：{csv_path}'
+    return {
+        'history_path': history_path,
+        'warning': warning,
         'mode': options.mode,
         'source_dir': str(source_dir),
         'recursive': options.recursive,
@@ -2286,7 +2408,7 @@ def run_rename_job(options: RenameJobOptions) -> dict:
         'output_dir': options.output_dir,
         'files_count': len(files),
         'ok_count': ok_count,
-        'error_count': sum(1 for r in results if r.get('status') not in ('ok',)),
+        'error_count': sum(1 for r in results if r.get('status') not in ('ok', 'unchanged')),
         'csv_path': csv_path,
         'results': results,
     }
@@ -3210,7 +3332,7 @@ def main():
                     print(f'  失败: {len(errors)} 个')
 
                 # 导出执行报告
-                csv_path = str(source_dir / 'rename_log.csv')
+                csv_path = renamer.journal_path
                 renamer.write_csv(csv_path)
                 print(f'  日志已保存: {csv_path}')
 

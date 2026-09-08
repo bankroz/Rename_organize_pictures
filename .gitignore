@@ -4,6 +4,11 @@ __pycache__/
 
 # Build artifacts
 build/
+dist/
+.local/
+.venv/
+*.egg-info/
+.pytest_cache/
 photo_renamer.pyz
 
 # IDE / Dev
@@ -21,6 +26,8 @@ _test_discover/
 # Runtime output
 preview_report.csv
 rename_log.csv
+rename_log_*.csv
+dist-desktop/
 rename_history.csv
 dedup_preview.csv
 dedup_log.csv

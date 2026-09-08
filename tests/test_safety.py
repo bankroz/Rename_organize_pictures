@@ -224,7 +224,14 @@ class SafetyTests(unittest.TestCase):
             root = Path(tmp)
             (root / '2022-05-01-2201.jpg').write_bytes(b'photo')
 
-            suggestions = discover_rule_suggestions(str(root))
+            config = root / 'patterns.json'
+            config.write_text(json.dumps({'patterns': [{
+                'id': 14, 'regex': r'(\d{4})-(\d{2})-(\d{2})',
+                'group_count': 3, 'description': 'date only', 'is_own_output': False,
+            }]}), encoding='utf-8')
+            with patch('photo_renamer._find_config_path', return_value=config):
+                suggestions = discover_rule_suggestions(str(root))
+            DateExtractor.reload_patterns()
 
             self.assertTrue(suggestions)
             self.assertEqual(suggestions[0]['signature'], 'YYYY-MM-DD-HHMM')

@@ -106,6 +106,13 @@
       "is_own_output": false
     },
     {
+      "id": 20,
+      "regex": "(\\d{4})-(\\d{2})-(\\d{2})-(\\d{2})(\\d{2})(?!\\d)",
+      "group_count": 5,
+      "description": "YYYY-MM-DD-HHMM（用户确认添加）",
+      "is_own_output": false
+    },
+    {
       "id": 13,
       "regex": "(\\d{4})\\.(\\d{2})\\.(\\d{2})",
       "group_count": 3,
